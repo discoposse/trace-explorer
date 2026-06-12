@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Mooncake Trace Explorer</title>
+<title>Trace Explorer</title>
 <style>
   html, body { margin: 0; height: 100%; background: #05070c; overflow: hidden;
                font: 13px/1.4 -apple-system, "SF Mono", Menlo, sans-serif; color: #9fb2c8; }
@@ -64,7 +64,7 @@
 <canvas id="c"></canvas>
 <div id="load">
   <div style="text-align:center">
-    <div style="color:#e8eef6;margin-bottom:10px">Load Mooncake elastic layout JSON</div>
+    <div style="color:#e8eef6;margin-bottom:10px">Load trace layout JSON</div>
     <input id="file" type="file" accept="application/json,.json" />
     <div style="margin-top:10px;color:#6e8096;font-size:11px">?data=mooncake_latest.json</div>
   </div>
@@ -75,7 +75,7 @@
   <button id="btnStack">Stack</button>
 </div>
 <div id="hud">
-  <h1 id="title">Mooncake trace explorer</h1>
+  <h1 id="title">Trace explorer</h1>
   <div class="sub" id="subtitle">Fabric · Streets · Hardware stack connectivity views</div>
 </div>
 <div id="dims"></div>
@@ -1165,7 +1165,7 @@ function setData(payload) {
     || new Set(payload.requests.map(r => r.prefix_lane)).size
     || 1;
   document.getElementById('load').classList.add('hidden');
-  document.getElementById('title').textContent = payload.meta.title || 'Mooncake trace explorer';
+  document.getElementById('title').textContent = payload.meta.title || 'Trace explorer';
   document.getElementById('subtitle').textContent =
     `${payload.meta.n_requests.toLocaleString()} requests · ${payload.meta.duration_s.toLocaleString()}s · Fabric · Streets · Stack`;
   initDashboard();
