@@ -15,6 +15,10 @@
   #hud { position: fixed; left: 16px; top: 58px; user-select: none; pointer-events: none; max-width: 640px; }
   #hud h1 { font-size: 15px; font-weight: 600; color: #e8eef6; margin: 0 0 4px; }
   #hud .sub { font-size: 11.5px; color: #6e8096; line-height: 1.45; }
+  #traceRow { pointer-events: auto; display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  #traceRow .lab { font-size: 11px; color: #6e8096; }
+  #tracePick { min-width: 168px; max-width: 240px; background: #14202e; color: #e8eef6;
+               border: 1px solid #2a3a4f; border-radius: 6px; padding: 5px 8px; font: 12px Menlo, monospace; }
   #clock { position: fixed; right: 20px; top: 16px; text-align: right; user-select: none; }
   #clock .t { font-size: 28px; font-weight: 700; color: #e8eef6; font-variant-numeric: tabular-nums; }
   #clock .sub { font-size: 11px; color: #6e8096; margin-top: 2px; }
@@ -80,6 +84,10 @@
 <div id="hud">
   <h1 id="title">Trace explorer</h1>
   <div class="sub" id="subtitle">Fabric · Streets · Stack · Scatter · Surface</div>
+  <div id="traceRow">
+    <label class="lab" for="tracePick">Trace</label>
+    <select id="tracePick" aria-label="Select trace to explore"></select>
+  </div>
 </div>
 <div id="dims"></div>
 <div id="hubs"></div>
@@ -201,6 +209,16 @@ const DASH_DIALS = [
 ];
 let dashDisplay = {};
 let dashInitialized = false;
+
+const TRACE_CATALOG = [
+  { id: 'toolagent', label: 'Toolagent', file: 'mooncake_preview.json' },
+  { id: 'conversation', label: 'Conversation', file: 'conversation_preview.json' },
+  { id: 'synthetic', label: 'Synthetic', file: 'synthetic_preview.json' },
+];
+const TRACE_STORAGE_KEY = 'trace-explorer.trace';
+const DEFAULT_TRACE_ID = 'toolagent';
+let currentTraceId = null;
+let traceLoading = false;
 
 function clearGroup(group) {
   while (group.children.length) {
@@ -1498,10 +1516,78 @@ function setData(payload) {
   tNorm = 0;
 }
 
+function traceById(id) {
+  return TRACE_CATALOG.find(t => t.id === id);
+}
+
+function traceByFile(file) {
+  return TRACE_CATALOG.find(t => t.file === file);
+}
+
+function populateTracePicker() {
+  const sel = document.getElementById('tracePick');
+  sel.innerHTML = TRACE_CATALOG.map(t =>
+    `<option value="${t.id}">${t.label}</option>`
+  ).join('');
+}
+
+function syncTraceUrl(file) {
+  const url = new URL(location.href);
+  url.searchParams.set('data', file);
+  history.replaceState(null, '', url);
+}
+
+function setTracePickerValue(traceId) {
+  const sel = document.getElementById('tracePick');
+  if (traceById(traceId)) sel.value = traceId;
+}
+
+function resolveInitialTraceId(dataParam) {
+  if (dataParam) {
+    const match = traceByFile(dataParam);
+    if (match) return match.id;
+    return null;
+  }
+  try {
+    const stored = localStorage.getItem(TRACE_STORAGE_KEY);
+    if (stored && traceById(stored)) return stored;
+  } catch (_) { /* private browsing */ }
+  return DEFAULT_TRACE_ID;
+}
+
 async function loadFromUrl(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
   setData(await res.json());
+}
+
+async function loadTrace(traceId, { persist = true, updateUrl = true } = {}) {
+  const entry = traceById(traceId);
+  if (!entry || traceLoading) return;
+  traceLoading = true;
+  playing = false;
+  document.getElementById('play').textContent = '▶';
+  document.getElementById('load').classList.remove('hidden');
+  document.getElementById('tracePick').disabled = true;
+  const subtitle = document.getElementById('subtitle');
+  const prevSubtitle = subtitle.textContent;
+  subtitle.textContent = `Loading ${entry.label} trace…`;
+
+  try {
+    await loadFromUrl(entry.file);
+    currentTraceId = traceId;
+    setTracePickerValue(traceId);
+    if (persist) {
+      try { localStorage.setItem(TRACE_STORAGE_KEY, traceId); } catch (_) { /* ignore */ }
+    }
+    if (updateUrl) syncTraceUrl(entry.file);
+  } catch (err) {
+    document.getElementById('load').classList.add('hidden');
+    subtitle.textContent = err.message || prevSubtitle;
+  } finally {
+    document.getElementById('tracePick').disabled = false;
+    traceLoading = false;
+  }
 }
 
 function tick(now) {
@@ -1549,14 +1635,20 @@ document.getElementById('speed').addEventListener('input', e => {
   document.getElementById('speedlab').textContent = `${Math.pow(10,+e.target.value).toFixed(2)}×`;
 });
 document.getElementById('colorMode').addEventListener('change', e => { colorMode = e.target.value; updateLegend(); updateFrame(); });
+document.getElementById('tracePick').addEventListener('change', e => { loadTrace(e.target.value); });
 document.getElementById('file').addEventListener('change', async e => {
   const file = e.target.files?.[0];
-  if (file) setData(JSON.parse(await file.text()));
+  if (!file) return;
+  currentTraceId = null;
+  try { localStorage.removeItem(TRACE_STORAGE_KEY); } catch (_) { /* ignore */ }
+  setData(JSON.parse(await file.text()));
 });
 
 window.addEventListener('resize', resize);
 resize();
 requestAnimationFrame(tick);
+
+populateTracePicker();
 
 const params = new URLSearchParams(location.search);
 const viewParam = params.get('view');
@@ -1564,8 +1656,16 @@ if (viewParam === 'topology') activeView = 'topology';
 if (viewParam === 'stack') activeView = 'stack';
 if (viewParam === 'scatter') activeView = 'scatter';
 if (viewParam === 'surface') activeView = 'surface';
+
 const dataUrl = params.get('data');
-if (dataUrl) loadFromUrl(dataUrl).catch(err => { document.getElementById('subtitle').textContent = err.message; });
+const initialTraceId = resolveInitialTraceId(dataUrl);
+if (dataUrl && !traceByFile(dataUrl)) {
+  loadFromUrl(dataUrl).catch(err => { document.getElementById('subtitle').textContent = err.message; });
+} else if (initialTraceId) {
+  loadTrace(initialTraceId, { persist: true, updateUrl: !dataUrl });
+} else {
+  loadTrace(DEFAULT_TRACE_ID);
+}
 </script>
 </body>
 </html>
