@@ -1,0 +1,1242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Mooncake Trace Explorer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070c; overflow: hidden;
+               font: 13px/1.4 -apple-system, "SF Mono", Menlo, sans-serif; color: #9fb2c8; }
+  #c { display: block; width: 100%; height: 100%; }
+  #views { position: fixed; left: 16px; top: 14px; display: flex; gap: 8px; z-index: 5; }
+  #views button { border-radius: 8px; border: 1px solid #2a3a4f; background: #14202e; color: #9fb2c8;
+                  padding: 8px 14px; cursor: pointer; font: 12px Menlo, monospace; }
+  #views button.active { color: #e8eef6; border-color: #e8814a; background: #1c2a3c; }
+  #hud { position: fixed; left: 16px; top: 58px; user-select: none; pointer-events: none; max-width: 640px; }
+  #hud h1 { font-size: 15px; font-weight: 600; color: #e8eef6; margin: 0 0 4px; }
+  #hud .sub { font-size: 11.5px; color: #6e8096; line-height: 1.45; }
+  #clock { position: fixed; right: 20px; top: 16px; text-align: right; user-select: none; }
+  #clock .t { font-size: 28px; font-weight: 700; color: #e8eef6; font-variant-numeric: tabular-nums; }
+  #clock .sub { font-size: 11px; color: #6e8096; margin-top: 2px; }
+  #panel { position: fixed; left: 16px; bottom: 16px; right: 16px; background: rgba(8,12,19,.88);
+           border: 1px solid #1d2735; border-radius: 10px; padding: 10px 16px;
+           backdrop-filter: blur(6px); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; z-index: 5; }
+  #play { width: 34px; height: 34px; border-radius: 8px; border: 1px solid #2a3a4f;
+          background: #14202e; color: #e8eef6; font-size: 14px; cursor: pointer; }
+  #time { flex: 1; min-width: 200px; accent-color: #e8814a; }
+  #panel .lab { font-size: 11px; color: #6e8096; white-space: nowrap; }
+  #panel select { background: #14202e; color: #e8eef6; border: 1px solid #2a3a4f; border-radius: 6px; padding: 4px 8px; }
+  #dashboard { position: fixed; right: 16px; top: 72px; width: 352px; display: none;
+               background: rgba(8,12,19,.9); border: 1px solid #1d2735; border-radius: 12px;
+               padding: 12px 14px 10px; backdrop-filter: blur(8px); z-index: 6;
+               user-select: none; pointer-events: none; }
+  #dashboard.visible { display: block; }
+  #dashboard .dash-hdr { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+  #dashboard .dash-hdr span:first-child { font-size: 12px; font-weight: 600; color: #e8eef6; letter-spacing: .03em; }
+  #dashboard .dash-source { font-size: 10px; color: #6e8096; }
+  #dashboard .dash-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #dashboard .metric-card { background: rgba(12,18,28,.82); border: 1px solid #1a2838; border-radius: 10px;
+                            padding: 8px 8px 7px; text-align: center; min-height: 88px; }
+  #dashboard .metric-card.wide { grid-column: span 3; display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; padding: 8px; }
+  #dashboard .metric-card.wide .stat { text-align: center; }
+  #dashboard .dial { width: 54px; height: 30px; display: block; margin: 0 auto 4px; }
+  #dashboard .dial-bg { fill: none; stroke: #1a2838; stroke-width: 4; stroke-linecap: round; }
+  #dashboard .dial-fill { fill: none; stroke-width: 4; stroke-linecap: round; transition: stroke-dasharray .25s ease; }
+  #dashboard .val { font-size: 17px; font-weight: 700; color: #e8eef6; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  #dashboard .val.sub { font-size: 13px; font-weight: 600; color: #b8c5d6; }
+  #dashboard .lbl { font-size: 9.5px; color: #6e8096; margin-top: 3px; letter-spacing: .02em; }
+  #dashboard .p90 { font-size: 9px; color: #556575; margin-top: 2px; }
+  #legend { position: fixed; right: 16px; bottom: 92px; background: rgba(8,12,19,.88);
+            border: 1px solid #1d2735; border-radius: 10px; padding: 10px 14px; min-width: 180px; z-index: 5; }
+  #legend .bar { width: 180px; height: 8px; border-radius: 4px;
+    background: linear-gradient(90deg, #ff5a3c, #ffb46e, #d8e0ea, #6fa8e8); }
+  #legend .lab { display: flex; justify-content: space-between; font-size: 10.5px; color: #6e8096; margin-top: 4px; }
+  #dims { position: fixed; left: 16px; top: 138px; background: rgba(8,12,19,.78);
+          border: 1px solid #1d2735; border-radius: 10px; padding: 8px 12px; font-size: 11px; line-height: 1.55; z-index: 4; }
+  #hubs { position: fixed; right: 16px; top: 500px; background: rgba(8,12,19,.78);
+          border: 1px solid #1d2735; border-radius: 10px; padding: 8px 12px; font-size: 11px; line-height: 1.7; display: none; z-index: 4; }
+  #hubs .row { display: flex; align-items: center; gap: 8px; }
+  #hubs .dot { width: 8px; height: 8px; border-radius: 50%; }
+  #load { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(5,7,12,.92); z-index: 20; }
+  #load.hidden { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="load">
+  <div style="text-align:center">
+    <div style="color:#e8eef6;margin-bottom:10px">Load Mooncake elastic layout JSON</div>
+    <input id="file" type="file" accept="application/json,.json" />
+    <div style="margin-top:10px;color:#6e8096;font-size:11px">?data=mooncake_latest.json</div>
+  </div>
+</div>
+<div id="views">
+  <button id="btnFabric" class="active">Fabric</button>
+  <button id="btnTopology">Streets</button>
+  <button id="btnStack">Stack</button>
+</div>
+<div id="hud">
+  <h1 id="title">Mooncake trace explorer</h1>
+  <div class="sub" id="subtitle">Fabric · Streets · Hardware stack connectivity views</div>
+</div>
+<div id="dims"></div>
+<div id="hubs"></div>
+<div id="clock">
+  <div class="t" id="tlabel">0:00</div>
+  <div class="sub" id="activeLabel">0 active</div>
+</div>
+<div id="dashboard"></div>
+<div id="panel">
+  <button id="play">▶</button>
+  <input id="time" type="range" min="0" max="1" step="any" value="0">
+  <span class="lab">color</span>
+  <select id="colorMode"></select>
+  <span class="lab">speed</span>
+  <input id="speed" type="range" min="-2" max="1.7" step="0.01" value="-0.3" style="width:100px">
+  <span class="lab" id="speedlab">1×</span>
+</div>
+<div id="legend">
+  <div class="bar"></div>
+  <div class="lab"><span id="legendLo">heavy</span><span id="legendHi">light</span></div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070c);
+scene.fog = new THREE.FogExp2(0x05070c, 0.028);
+
+const camera = new THREE.PerspectiveCamera(52, 2, 0.01, 300);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+
+let data = null;
+let playing = false;
+let tNorm = 0;
+let lastFrame = performance.now();
+let colorMode = 'latency';
+let activeView = 'fabric';
+let nPrefixLanes = 1;
+const dummy = new THREE.Object3D();
+const color = new THREE.Color();
+const tmpVec = new THREE.Vector3();
+
+const fabricGroup = new THREE.Group();
+const topologyGroup = new THREE.Group();
+const stackGroup = new THREE.Group();
+scene.add(fabricGroup);
+scene.add(topologyGroup);
+scene.add(stackGroup);
+
+let fabricInstanced = null;
+let fabricEdgeGeom = null;
+let fabricEdgeLines = null;
+
+let topoInstanced = null;
+let topoEdgeGeom = null;
+let topoEdgeLines = null;
+let topoTargetPos = null;
+let topoSmoothPos = null;
+let topoTargetStreets = null;
+let topoSmoothStreets = null;
+const hubMeshes = [];
+const streetLines = [];
+const STREET_COLORS = [0x6fa8e8, 0xc9a227, 0x9fb2c8, 0x76b900, 0x4a5a6e];
+
+const SUB_COLORS = { network: 0x6fa8e8, storage: 0xc9a227, cpu: 0x9fb2c8, gpu: 0x76b900 };
+const PIPE_ORDER = ['network', 'storage', 'cpu', 'gpu'];
+const STACK_ORDER = ['network', 'storage', 'kv_cache', 'gpu', 'hbm'];
+const STACK_COLORS = { network: 0x6fa8e8, storage: 0xc9a227, kv_cache: 0xe07a5f, gpu: 0x76b900, hbm: 0xb366ff };
+const STACK_LABELS = { network: 'Network', storage: 'Storage', kv_cache: 'KV Cache', gpu: 'GPU', hbm: 'HBM' };
+
+let stackLayerMeshes = [];
+let stackPlatformMeshes = [];
+let stackBusLines = null;
+let stackFlowGeom = null;
+let stackFlowLines = null;
+const stackLayerPosCache = Array.from({ length: 5 }, () => new THREE.Vector3());
+
+const DASH_NUMERIC_KEYS = [
+  'ttft_live_ms', 'ttft_p50_ms', 'ttft_p90_ms', 'itl_p50_ms', 'itl_p90_ms',
+  'latency_p50_ms', 'latency_p90_ms', 'latency_max_ms', 'prefill_tput', 'decode_tput',
+  'input_tokens_avg', 'output_tokens_avg', 'stress_index', 'active', 'pending', 'completed',
+  'in_prefill', 'in_decode', 'breath',
+];
+const DASH_DIALS = [
+  { key: 'ttft_p50_ms', p90: 'ttft_p90_ms', label: 'TTFT p50', color: '#6fa8e8', scale: 'ttft_ms', fmt: 'ms' },
+  { key: 'itl_p50_ms', p90: 'itl_p90_ms', label: 'ITL p50', color: '#e07a5f', scale: 'itl_ms', fmt: 'itl' },
+  { key: 'latency_p50_ms', p90: 'latency_p90_ms', label: 'E2E p50', color: '#ffb46e', scale: 'latency_ms', fmt: 'ms' },
+];
+let dashDisplay = {};
+let dashInitialized = false;
+
+function clearGroup(group) {
+  while (group.children.length) {
+    const child = group.children[0];
+    group.remove(child);
+    child.geometry?.dispose();
+    if (child.material) {
+      if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+      else child.material.dispose();
+    }
+  }
+}
+
+function ratioColor(r, out) {
+  const rr = Math.max(0.2, Math.min(2.5, 1 + Math.log10(Math.max(1e-6, r))));
+  const stops = [
+    [0.30, [1.00, 0.22, 0.13]], [0.52, [1.00, 0.45, 0.20]],
+    [0.74, [1.00, 0.72, 0.45]], [0.92, [0.62, 0.66, 0.72]], [1.00, [0.45, 0.66, 0.90]],
+  ];
+  if (rr <= stops[0][0]) { const c = stops[0][1]; out[0]=c[0]; out[1]=c[1]; out[2]=c[2]; return; }
+  for (let i = 1; i < stops.length; i++) {
+    if (rr <= stops[i][0]) {
+      const [v0,c0]=stops[i-1], [v1,c1]=stops[i];
+      const t = (rr-v0)/(v1-v0);
+      out[0]=c0[0]+(c1[0]-c0[0])*t; out[1]=c0[1]+(c1[1]-c0[1])*t; out[2]=c0[2]+(c1[2]-c0[2])*t;
+      return;
+    }
+  }
+  const c = stops.at(-1)[1]; out[0]=c[0]; out[1]=c[1]; out[2]=c[2];
+}
+
+function metricValue(req, mode) {
+  if (mode === 'input_length') return req.input_length;
+  if (mode === 'output_length') return req.output_length;
+  if (mode === 'prefix_blocks') return req.prefix_blocks;
+  if (mode === 'gpu') return req.pipeline?.gpu ?? 0.25;
+  if (mode === 'network') return req.pipeline?.network ?? 0.25;
+  if (mode === 'storage') return req.pipeline?.storage ?? 0.25;
+  if (mode === 'cpu') return req.pipeline?.cpu ?? 0.25;
+  return req.latency_ms;
+}
+
+function metricRatio(req, mode, baseline) {
+  const v = metricValue(req, mode);
+  if (['gpu','network','storage','cpu'].includes(mode)) return Math.max(0.25, v * 4);
+  return Math.max(0.2, v / Math.max(baseline, 1e-6));
+}
+
+function colorInputForMode(req, mode, baseline) {
+  const v = metricValue(req, mode);
+  if (mode === 'latency') return baseline / Math.max(v, 1e-6);
+  const ratio = metricRatio(req, mode, baseline);
+  if (['gpu','network','storage','cpu'].includes(mode)) return ratio;
+  return 2.1 - Math.min(1.8, ratio);
+}
+
+function lerp(a,b,t){ return a+(b-a)*t; }
+
+function sampleFabricWindow(tMs) {
+  const windows = data.windows;
+  if (!windows.length) return null;
+  if (tMs <= windows[0].t_ms) return { ...windows[0], tMs: windows[0].t_ms };
+  for (let i = 1; i < windows.length; i++) {
+    const w0 = windows[i-1], w1 = windows[i];
+    if (tMs <= w1.t_ms) {
+      const u = (tMs - w0.t_ms) / Math.max(w1.t_ms - w0.t_ms, 1e-6);
+      const n = data.requests.length;
+      const positions_flat = new Array(n * 3);
+      for (let j = 0; j < n * 3; j++) positions_flat[j] = lerp(w0.positions_flat[j], w1.positions_flat[j], u);
+      return {
+        breath: lerp(w0.breath, w1.breath, u),
+        active_requests: Math.round(lerp(w0.active_requests, w1.active_requests, u)),
+        positions_flat, tMs,
+      };
+    }
+  }
+  const last = windows.at(-1);
+  return { ...last, tMs: last.t_ms };
+}
+
+function warpStreets(x, y, z, breath) {
+  const theta = (x + 1) * Math.PI;
+  const R = 1.08 * breath;
+  const r = 0.34 * (z + 1) * 0.5;
+  const phi = y * Math.PI * 0.9;
+  const wx = (R + r * Math.cos(phi)) * Math.cos(theta) + 0.2 * y * Math.sin(theta * 2.35);
+  const wy = (R + r * Math.cos(phi)) * Math.sin(theta) - 0.16 * z * Math.cos(theta * 1.65);
+  const wz = r * Math.sin(phi) + 0.34 * z * Math.cos(y * Math.PI * 0.55);
+  return [wx, wy, wz];
+}
+
+function fallbackTopologyFrame(fabricFrame) {
+  const breath = fabricFrame.breath ?? 1;
+  const pf = fabricFrame.positions_flat;
+  const positions_flat = new Array(pf.length);
+  for (let i = 0; i < pf.length; i += 3) {
+    const [wx, wy, wz] = warpStreets(pf[i], pf[i + 1], pf[i + 2], breath);
+    positions_flat[i] = wx;
+    positions_flat[i + 1] = wy;
+    positions_flat[i + 2] = wz;
+  }
+  return { ...fabricFrame, positions_flat, street_flat: null };
+}
+
+function sampleTopologyWindow(tMs, fabricFrame = null) {
+  const windows = data.topology?.windows;
+  if (!windows?.length) return fabricFrame ? fallbackTopologyFrame(fabricFrame) : null;
+  let frame = null;
+  if (tMs <= windows[0].t_ms) frame = { ...windows[0], tMs: windows[0].t_ms };
+  else if (tMs >= windows.at(-1).t_ms) frame = { ...windows.at(-1), tMs: windows.at(-1).t_ms };
+  else {
+    for (let i = 1; i < windows.length; i++) {
+      const w0 = windows[i - 1], w1 = windows[i];
+      if (tMs <= w1.t_ms) {
+        const u = (tMs - w0.t_ms) / Math.max(w1.t_ms - w0.t_ms, 1e-6);
+        const nPos = w0.positions_flat?.length ?? 0;
+        const positions_flat = w0.positions_flat ? new Array(nPos) : null;
+        if (positions_flat) {
+          for (let j = 0; j < nPos; j++) positions_flat[j] = lerp(w0.positions_flat[j], w1.positions_flat[j], u);
+        }
+        const nStreet = w0.street_flat?.length ?? 0;
+        const street_flat = w0.street_flat ? new Array(nStreet) : null;
+        if (street_flat) {
+          for (let j = 0; j < nStreet; j++) street_flat[j] = lerp(w0.street_flat[j], w1.street_flat[j], u);
+        }
+        const hubs_flat = w0.hubs_flat.map((v, j) => lerp(v, w1.hubs_flat[j], u));
+        const hub_stress = w0.hub_stress.map((v, j) => lerp(v, w1.hub_stress[j], u));
+        frame = {
+          breath: lerp(w0.breath, w1.breath, u),
+          active_requests: Math.round(lerp(w0.active_requests, w1.active_requests, u)),
+          positions_flat, street_flat, hubs_flat, hub_stress, tMs,
+        };
+        break;
+      }
+    }
+  }
+  if (!frame?.positions_flat && fabricFrame) return fallbackTopologyFrame(fabricFrame);
+  return frame;
+}
+
+function formatTime(ms) {
+  const sec = ms / 1000;
+  return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+}
+
+function formatMs(v) {
+  if (!v || v <= 0) return '—';
+  if (v >= 10000) return `${(v / 1000).toFixed(2)} s`;
+  return `${Math.round(v).toLocaleString()} ms`;
+}
+
+function formatItl(v) {
+  if (!v || v <= 0) return '—';
+  return `${v.toFixed(v < 10 ? 2 : 1)} ms`;
+}
+
+function formatTput(v) {
+  if (!v || v <= 0) return '—';
+  return `${Math.round(v).toLocaleString()} tok/s`;
+}
+
+function formatCount(v) {
+  return Math.round(v || 0).toLocaleString();
+}
+
+function initDashboard() {
+  const root = document.getElementById('dashboard');
+  const dialSvg = (id, color) => `
+    <svg class="dial" viewBox="0 0 60 34">
+      <path class="dial-bg" d="M6,28 A24,24 0 0 1 54,28" />
+      <path class="dial-fill" id="${id}" d="M6,28 A24,24 0 0 1 54,28" stroke="${color}" stroke-dasharray="0 75.4" />
+    </svg>`;
+  const cards = DASH_DIALS.map(d => `
+    <div class="metric-card">
+      ${dialSvg(`dial-${d.key}`, d.color)}
+      <div class="val" id="val-${d.key}">—</div>
+      <div class="lbl">${d.label}</div>
+      <div class="p90" id="p90-${d.key}">p90 —</div>
+    </div>`).join('');
+  root.innerHTML = `
+    <div class="dash-hdr">
+      <span>UX Metrics</span>
+      <span id="dash-source" class="dash-source">live cohort</span>
+    </div>
+    <div class="dash-grid">${cards}</div>
+    <div class="dash-grid" style="margin-top:8px">
+      <div class="metric-card">
+        ${dialSvg('dial-ttft_live_ms', '#9fd4a8')}
+        <div class="val" id="val-ttft_live_ms">—</div>
+        <div class="lbl">TTFT live wait</div>
+      </div>
+      <div class="metric-card">
+        ${dialSvg('dial-stress_index', '#e8814a')}
+        <div class="val" id="val-stress_index">—</div>
+        <div class="lbl">Load stress</div>
+      </div>
+      <div class="metric-card">
+        ${dialSvg('dial-decode_tput', '#b366ff')}
+        <div class="val sub" id="val-decode_tput">—</div>
+        <div class="lbl">Decode tok/s</div>
+      </div>
+    </div>
+    <div class="metric-card wide" style="margin-top:8px">
+      <div class="stat"><div class="val sub" id="val-active">0</div><div class="lbl">Active</div></div>
+      <div class="stat"><div class="val sub" id="val-in_prefill">0</div><div class="lbl">Prefill</div></div>
+      <div class="stat"><div class="val sub" id="val-in_decode">0</div><div class="lbl">Decode</div></div>
+      <div class="stat"><div class="val sub" id="val-pending">0</div><div class="lbl">Pending</div></div>
+    </div>
+    <div class="dash-grid" style="margin-top:8px">
+      <div class="metric-card">
+        <div class="val sub" id="val-prefill_tput">—</div>
+        <div class="lbl">Prefill tok/s</div>
+      </div>
+      <div class="metric-card">
+        <div class="val sub" id="val-input_tokens_avg">—</div>
+        <div class="lbl">Avg input tok</div>
+      </div>
+      <div class="metric-card">
+        <div class="val sub" id="val-output_tokens_avg">—</div>
+        <div class="lbl">Avg output tok</div>
+      </div>
+    </div>`;
+  dashDisplay = Object.fromEntries(DASH_NUMERIC_KEYS.map(k => [k, 0]));
+  dashInitialized = true;
+}
+
+function setDial(key, value, scaleKey) {
+  const path = document.getElementById(`dial-${key}`);
+  if (!path) return;
+  const scale = data?.meta?.dashboard_scale?.[scaleKey] || data?.meta?.baselines?.[scaleKey] || 1;
+  const pct = Math.min(1, Math.max(0, value / Math.max(scale, 1e-6)));
+  path.style.strokeDasharray = `${(75.4 * pct).toFixed(1)} 75.4`;
+}
+
+function sampleDashboardWindow(tMs) {
+  const windows = data.dashboard?.windows;
+  if (!windows?.length) return null;
+  if (tMs <= windows[0].t_ms) return { ...windows[0], tMs: windows[0].t_ms };
+  for (let i = 1; i < windows.length; i++) {
+    const w0 = windows[i - 1], w1 = windows[i];
+    if (tMs <= w1.t_ms) {
+      const u = (tMs - w0.t_ms) / Math.max(w1.t_ms - w0.t_ms, 1e-6);
+      const out = { tMs };
+      for (const key of DASH_NUMERIC_KEYS) out[key] = lerp(w0[key] ?? 0, w1[key] ?? 0, u);
+      return out;
+    }
+  }
+  return { ...windows.at(-1), tMs: windows.at(-1).t_ms };
+}
+
+function updateDashboard(frame) {
+  if (!dashInitialized || !frame) return;
+  const smooth = playing ? 0.22 : 0.38;
+  for (const key of DASH_NUMERIC_KEYS) {
+    dashDisplay[key] += ((frame[key] ?? 0) - dashDisplay[key]) * smooth;
+  }
+
+  const d = dashDisplay;
+  document.getElementById('val-ttft_p50_ms').textContent = formatMs(d.ttft_p50_ms);
+  document.getElementById('val-itl_p50_ms').textContent = formatItl(d.itl_p50_ms);
+  document.getElementById('val-latency_p50_ms').textContent = formatMs(d.latency_p50_ms);
+  document.getElementById('val-ttft_live_ms').textContent = formatMs(d.ttft_live_ms);
+  document.getElementById('val-stress_index').textContent = `${d.stress_index.toFixed(2)}×`;
+  document.getElementById('val-decode_tput').textContent = formatTput(d.decode_tput);
+  document.getElementById('val-prefill_tput').textContent = formatTput(d.prefill_tput);
+  document.getElementById('val-active').textContent = formatCount(d.active);
+  document.getElementById('val-in_prefill').textContent = formatCount(d.in_prefill);
+  document.getElementById('val-in_decode').textContent = formatCount(d.in_decode);
+  document.getElementById('val-pending').textContent = formatCount(d.pending);
+  document.getElementById('val-input_tokens_avg').textContent = formatCount(d.input_tokens_avg);
+  document.getElementById('val-output_tokens_avg').textContent = formatCount(d.output_tokens_avg);
+
+  const p90 = (key, fmt) => {
+    const el = document.getElementById(`p90-${key}`);
+    if (!el) return;
+    const v = frame[`${key.replace('_p50', '_p90')}`] ?? frame[`${key}_ms`];
+    el.textContent = fmt === 'itl' ? `p90 ${formatItl(v)}` : `p90 ${formatMs(v)}`;
+  };
+  p90('ttft_p50_ms', 'ms');
+  p90('itl_p50_ms', 'itl');
+  p90('latency_p50_ms', 'ms');
+
+  setDial('ttft_p50_ms', d.ttft_p50_ms, 'ttft_ms');
+  setDial('itl_p50_ms', d.itl_p50_ms, 'itl_ms');
+  setDial('latency_p50_ms', d.latency_p50_ms, 'latency_ms');
+  setDial('ttft_live_ms', d.ttft_live_ms, 'ttft_ms');
+  setDial('stress_index', d.stress_index, 'stress_index');
+  setDial('decode_tput', d.decode_tput, 'decode_tput');
+
+  const avail = data.meta.metric_availability || {};
+  const src = data.meta.measured_metrics?.ttft ? 'measured + estimated' : 'estimated from trace';
+  document.getElementById('dash-source').textContent =
+    `TTFT ${avail.time_to_first_token ?? 0}/${data.requests.length} · ${src}`;
+}
+
+function topologyExtent() {
+  const pf = data.topology?.windows?.[0]?.positions_flat;
+  if (!pf?.length) return data.meta.extent;
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity, zmin = Infinity, zmax = -Infinity;
+  for (let i = 0; i < pf.length; i += 3) {
+    xmin = Math.min(xmin, pf[i]); xmax = Math.max(xmax, pf[i]);
+    ymin = Math.min(ymin, pf[i + 1]); ymax = Math.max(ymax, pf[i + 1]);
+    zmin = Math.min(zmin, pf[i + 2]); zmax = Math.max(zmax, pf[i + 2]);
+  }
+  const pad = 0.35;
+  return [xmin - pad, xmax + pad, ymin - pad, ymax + pad, zmin - pad, zmax + pad];
+}
+
+function buildFabricScene() {
+  clearGroup(fabricGroup);
+  const n = data.requests.length;
+  const geo = new THREE.SphereGeometry(0.012, 8, 8);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x0a0a12, metalness: 0.15, roughness: 0.5 });
+  fabricInstanced = new THREE.InstancedMesh(geo, mat, n);
+  fabricInstanced.frustumCulled = false;
+  fabricInstanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  fabricInstanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+  fabricGroup.add(fabricInstanced);
+
+  const edgeCount = data.edges.length;
+  const posArr = new Float32Array(Math.max(edgeCount, 1) * 6);
+  const colArr = new Float32Array(Math.max(edgeCount, 1) * 6);
+  fabricEdgeGeom = new THREE.BufferGeometry();
+  fabricEdgeGeom.setAttribute('position', new THREE.BufferAttribute(posArr, 3).setUsage(THREE.DynamicDrawUsage));
+  fabricEdgeGeom.setAttribute('color', new THREE.BufferAttribute(colArr, 3).setUsage(THREE.DynamicDrawUsage));
+  fabricEdgeLines = new THREE.LineSegments(fabricEdgeGeom, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.42 }));
+  fabricEdgeLines.frustumCulled = false;
+  fabricGroup.add(fabricEdgeLines);
+
+  const ext = data.meta.extent;
+  const cx = (ext[0]+ext[1])/2, cy = (ext[2]+ext[3])/2, cz = (ext[4]+ext[5])/2;
+  const span = Math.max(ext[1]-ext[0], ext[3]-ext[2], ext[5]-ext[4]);
+  controls.target.set(cx, cy, cz);
+  camera.position.set(cx + span*0.55, cy + span*0.42, cz + span*0.85);
+}
+
+function buildTopologyScene() {
+  clearGroup(topologyGroup);
+  hubMeshes.length = 0;
+  streetLines.length = 0;
+  topoTargetPos = null;
+  topoSmoothPos = null;
+  topoTargetStreets = null;
+  topoSmoothStreets = null;
+
+  const streetMeta = data.topology?.street_meta || { streets: 5, points_per_street: 36 };
+  for (let si = 0; si < streetMeta.streets; si++) {
+    const pts = streetMeta.points_per_street;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    const line = new THREE.Line(
+      geo,
+      new THREE.LineBasicMaterial({
+        color: STREET_COLORS[si] || 0x6fa8e8,
+        transparent: true,
+        opacity: si === streetMeta.streets - 1 ? 0.22 : 0.42,
+      }),
+    );
+    line.frustumCulled = false;
+    line.userData.streetIdx = si;
+    streetLines.push(line);
+    topologyGroup.add(line);
+  }
+
+  const subs = data.topology?.subsystems || [];
+  for (const sub of subs) {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 16, 16),
+      new THREE.MeshStandardMaterial({
+        color: SUB_COLORS[sub.id] || 0xffffff,
+        emissive: SUB_COLORS[sub.id] || 0xffffff,
+        emissiveIntensity: 0.45,
+        metalness: 0.25,
+        roughness: 0.4,
+      }),
+    );
+    mesh.userData.subId = sub.id;
+    hubMeshes.push(mesh);
+    topologyGroup.add(mesh);
+  }
+
+  const n = data.requests.length;
+  const geo = new THREE.SphereGeometry(0.011, 8, 8);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x08080c, metalness: 0.2, roughness: 0.5 });
+  topoInstanced = new THREE.InstancedMesh(geo, mat, n);
+  topoInstanced.frustumCulled = false;
+  topoInstanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  topoInstanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+  topologyGroup.add(topoInstanced);
+
+  const edgeCount = data.edges.length;
+  const posArr = new Float32Array(Math.max(edgeCount, 1) * 6);
+  const colArr = new Float32Array(Math.max(edgeCount, 1) * 6);
+  topoEdgeGeom = new THREE.BufferGeometry();
+  topoEdgeGeom.setAttribute('position', new THREE.BufferAttribute(posArr, 3).setUsage(THREE.DynamicDrawUsage));
+  topoEdgeGeom.setAttribute('color', new THREE.BufferAttribute(colArr, 3).setUsage(THREE.DynamicDrawUsage));
+  topoEdgeLines = new THREE.LineSegments(topoEdgeGeom, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.55 }));
+  topoEdgeLines.frustumCulled = false;
+  topologyGroup.add(topoEdgeLines);
+
+  const ext = topologyExtent();
+  const cx = (ext[0] + ext[1]) / 2, cy = (ext[2] + ext[3]) / 2, cz = (ext[4] + ext[5]) / 2;
+  const span = Math.max(ext[1] - ext[0], ext[3] - ext[2], ext[5] - ext[4]);
+  controls.target.set(cx, cy, cz);
+  camera.position.set(cx + span * 0.62, cy + span * 0.48, cz + span * 0.92);
+}
+
+function requestLife(req, tMs) {
+  if (tMs < req.start_ms) return { phase: 'pending', progress: 0 };
+  if (tMs > req.end_ms) return { phase: 'done', progress: 1 };
+  return {
+    phase: 'active',
+    progress: (tMs - req.start_ms) / Math.max(req.end_ms - req.start_ms, 1e-6),
+  };
+}
+
+function deriveHardware(req) {
+  if (req.hardware) return req.hardware;
+  const p = req.pipeline || { network: 0.25, storage: 0.25, cpu: 0.25, gpu: 0.25 };
+  const blocks = Math.max(1, Math.ceil(req.input_length / 512));
+  const cacheRatio = Math.min(1, (req.prefix_blocks || 1) / blocks);
+  const raw = {
+    network: p.network,
+    storage: p.storage * (1 - cacheRatio * 0.65),
+    kv_cache: p.storage * cacheRatio * 0.85 + p.cpu * 0.15,
+    gpu: p.gpu * 0.62,
+    hbm: p.gpu * 0.38 + Math.min(req.input_length / 120000, 0.2),
+  };
+  const total = STACK_ORDER.reduce((s, k) => s + raw[k], 0);
+  return Object.fromEntries(STACK_ORDER.map(k => [k, raw[k] / Math.max(total, 1e-6)]));
+}
+
+function stackMotionMetric(req, mode) {
+  const baseline = data.meta.baseline_latency_ms || 1;
+  const maxIsl = data.meta.max_isl || Math.max(...data.requests.map(r => r.input_length), 1);
+  const maxTok = data.meta.max_tokens || Math.max(...data.requests.map(r => r.total_tokens), 1);
+  if (mode === 'input_length') return req.input_length / maxIsl;
+  if (mode === 'output_length') return req.output_length / Math.max(...data.requests.map(r => r.output_length), 1);
+  if (mode === 'total_tokens') return req.total_tokens / maxTok;
+  return Math.min(2.5, req.latency_ms / baseline);
+}
+
+function sampleHardwareWindow(tMs) {
+  const windows = data.hardware?.windows;
+  if (!windows?.length) return null;
+  if (tMs <= windows[0].t_ms) return { ...windows[0], tMs: windows[0].t_ms };
+  for (let i = 1; i < windows.length; i++) {
+    const w0 = windows[i - 1], w1 = windows[i];
+    if (tMs <= w1.t_ms) {
+      const u = (tMs - w0.t_ms) / Math.max(w1.t_ms - w0.t_ms, 1e-6);
+      return {
+        breath: lerp(w0.breath, w1.breath, u),
+        active_requests: Math.round(lerp(w0.active_requests, w1.active_requests, u)),
+        layer_stress: w0.layer_stress.map((v, j) => lerp(v, w1.layer_stress[j], u)),
+        tMs,
+      };
+    }
+  }
+  const last = windows.at(-1);
+  return { ...last, tMs: last.t_ms };
+}
+
+function stackLayerCenters() {
+  return data.hardware?.layer_positions || [
+    [0, 2.5, -0.8], [-1.7, 1.2, 1.1], [1.7, 1.2, 1.1], [0, 0, 0], [1.8, -0.35, -0.6],
+  ];
+}
+
+function stackLayerPosition(req, layerIdx, reqIdx, tMs, frame) {
+  const centers = stackLayerCenters();
+  const layerId = STACK_ORDER[layerIdx];
+  const center = centers[layerIdx];
+  const hw = deriveHardware(req)[layerId] ?? 0.2;
+  const maxIsl = data.meta.max_isl || 1;
+  const maxTok = data.meta.max_tokens || 1;
+  const baseline = data.meta.baseline_latency_ms || 1;
+  const breath = frame.breath ?? 1;
+  const motion = stackMotionMetric(req, colorMode);
+  const life = requestLife(req, tMs);
+  const flowPhase = life.phase === 'active' ? life.progress : life.phase === 'done' ? 1 : 0;
+
+  const sched = (req.start_ms / data.meta.duration_ms) * 2 - 1;
+  const islNorm = req.input_length / maxIsl;
+  const tokNorm = req.total_tokens / maxTok;
+  const latNorm = Math.min(2.5, req.latency_ms / baseline);
+  const spread = 0.52 * breath;
+
+  const ox = sched * spread + 0.07 * Math.sin(reqIdx * 1.37 + layerIdx * 0.8);
+  const oy = (latNorm - 0.8) * 0.18 * motion + 0.05 * Math.sin(reqIdx * 0.9 + layerIdx + tMs * 0.0004);
+  const oz = islNorm * spread + tokNorm * 0.22 + 0.06 * Math.cos(reqIdx * 1.2);
+
+  const pos = stackLayerPosCache[layerIdx];
+  pos.set(center[0] + ox, center[1] + oy, center[2] + oz);
+
+  if (layerIdx < STACK_ORDER.length - 1) {
+    const next = centers[layerIdx + 1];
+    tmpVec.set(next[0] - center[0], next[1] - center[1], next[2] - center[2]).normalize();
+    pos.addScaledVector(tmpVec, flowPhase * hw * motion * 0.42);
+  }
+  return pos;
+}
+
+function updateHubsPanel() {
+  const el = document.getElementById('hubs');
+  if (activeView === 'stack') {
+    el.innerHTML = STACK_ORDER.map(id =>
+      `<div class="row"><span class="dot" style="background:#${STACK_COLORS[id].toString(16).padStart(6,'0')}"></span>${STACK_LABELS[id]}</div>`
+    ).join('');
+    el.style.display = 'block';
+  } else if (activeView === 'topology') {
+    el.innerHTML = `
+      <div class="row"><span class="dot" style="background:#6fa8e8"></span>Network ingress</div>
+      <div class="row"><span class="dot" style="background:#c9a227"></span>Storage / KV cache</div>
+      <div class="row"><span class="dot" style="background:#9fb2c8"></span>CPU scheduler</div>
+      <div class="row"><span class="dot" style="background:#76b900"></span>GPU compute</div>`;
+    el.style.display = 'block';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+function buildStackScene() {
+  clearGroup(stackGroup);
+  stackLayerMeshes = [];
+  stackPlatformMeshes = [];
+
+  const centers = stackLayerCenters();
+  const n = data.requests.length;
+
+  for (let li = 0; li < STACK_ORDER.length; li++) {
+    const layerId = STACK_ORDER[li];
+    const c = centers[li];
+    const platform = new THREE.Mesh(
+      new THREE.BoxGeometry(2.6, 0.14, 2.2),
+      new THREE.MeshStandardMaterial({
+        color: STACK_COLORS[layerId],
+        emissive: STACK_COLORS[layerId],
+        emissiveIntensity: 0.12,
+        metalness: 0.35,
+        roughness: 0.45,
+        transparent: true,
+        opacity: 0.35,
+      }),
+    );
+    platform.position.set(c[0], c[1] - 0.12, c[2]);
+    platform.userData.layerIdx = li;
+    stackPlatformMeshes.push(platform);
+    stackGroup.add(platform);
+
+    const geo = new THREE.SphereGeometry(0.009, 7, 7);
+    const mat = new THREE.MeshStandardMaterial({
+      color: STACK_COLORS[layerId],
+      emissive: STACK_COLORS[layerId],
+      emissiveIntensity: 0.35,
+      metalness: 0.25,
+      roughness: 0.4,
+    });
+    const mesh = new THREE.InstancedMesh(geo, mat, n);
+    mesh.frustumCulled = false;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    stackLayerMeshes.push(mesh);
+    stackGroup.add(mesh);
+  }
+
+  const links = data.hardware?.links || [
+    { from: 'network', to: 'storage' }, { from: 'network', to: 'kv_cache' },
+    { from: 'storage', to: 'kv_cache' }, { from: 'kv_cache', to: 'gpu' },
+    { from: 'gpu', to: 'hbm' }, { from: 'storage', to: 'gpu' },
+  ];
+  const busPos = new Float32Array(links.length * 6);
+  const busCol = new Float32Array(links.length * 6);
+  const idxOf = Object.fromEntries(STACK_ORDER.map((id, i) => [id, i]));
+  let bi = 0;
+  for (const link of links) {
+    const a = centers[idxOf[link.from]], b = centers[idxOf[link.to]];
+    color.setHex(STACK_COLORS[link.from] || 0xffffff);
+    busPos[bi] = a[0]; busPos[bi + 1] = a[1]; busPos[bi + 2] = a[2];
+    busCol[bi] = color.r * 0.5; busCol[bi + 1] = color.g * 0.5; busCol[bi + 2] = color.b * 0.5; bi += 3;
+    color.setHex(STACK_COLORS[link.to] || 0xffffff);
+    busPos[bi] = b[0]; busPos[bi + 1] = b[1]; busPos[bi + 2] = b[2];
+    busCol[bi] = color.r * 0.7; busCol[bi + 1] = color.g * 0.7; busCol[bi + 2] = color.b * 0.7; bi += 3;
+  }
+  const busGeom = new THREE.BufferGeometry();
+  busGeom.setAttribute('position', new THREE.BufferAttribute(busPos, 3));
+  busGeom.setAttribute('color', new THREE.BufferAttribute(busCol, 3));
+  stackBusLines = new THREE.LineSegments(busGeom, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.55 }));
+  stackBusLines.frustumCulled = false;
+  stackGroup.add(stackBusLines);
+
+  const segsPerReq = STACK_ORDER.length - 1;
+  stackFlowGeom = new THREE.BufferGeometry();
+  stackFlowGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * segsPerReq * 6), 3).setUsage(THREE.DynamicDrawUsage));
+  stackFlowGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * segsPerReq * 6), 3).setUsage(THREE.DynamicDrawUsage));
+  stackFlowLines = new THREE.LineSegments(stackFlowGeom, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.48 }));
+  stackFlowLines.frustumCulled = false;
+  stackGroup.add(stackFlowLines);
+
+  controls.target.set(0, 1.0, 0);
+  camera.position.set(4.2, 2.8, 4.8);
+}
+
+function updateStack(frame) {
+  if (!stackLayerMeshes.length || !frame) return 0;
+  const tMs = frame.tMs ?? 0;
+  const breathPulse = 0.86 + 0.16 * (frame.breath ?? 1);
+  const minSize = 0.22, maxSize = 1.85;
+  let activeCount = 0;
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.0045);
+
+  for (let li = 0; li < stackPlatformMeshes.length; li++) {
+    const stress = frame.layer_stress?.[li] ?? 1;
+    const mesh = stackPlatformMeshes[li];
+    mesh.scale.set(0.92 + 0.22 * stress, 1, 0.92 + 0.18 * stress);
+    mesh.material.emissiveIntensity = 0.1 + 0.22 * Math.min(stress, 2.2);
+    mesh.material.opacity = 0.28 + 0.14 * breathPulse;
+  }
+
+  for (let i = 0; i < data.requests.length; i++) {
+    const req = data.requests[i];
+    const life = requestLife(req, tMs);
+    let size = minSize + req.size * (maxSize - minSize);
+
+    if (life.phase === 'pending') { size *= 0.45; }
+    else if (life.phase === 'done') { size *= 0.72; }
+    else { activeCount++; size *= 1.1 + 0.25 * Math.sin(life.progress * Math.PI) + 0.1 * pulse; }
+
+    for (let li = 0; li < STACK_ORDER.length; li++) {
+      const pos = stackLayerPosition(req, li, i, tMs, frame);
+      dummy.position.copy(pos);
+      dummy.scale.setScalar(size * (0.85 + 0.3 * deriveHardware(req)[STACK_ORDER[li]]));
+      dummy.updateMatrix();
+      stackLayerMeshes[li].setMatrixAt(i, dummy.matrix);
+    }
+  }
+
+  for (const mesh of stackLayerMeshes) mesh.instanceMatrix.needsUpdate = true;
+
+  const posAttr = stackFlowGeom.attributes.position;
+  const colAttr = stackFlowGeom.attributes.color;
+  let vi = 0;
+  for (let i = 0; i < data.requests.length; i++) {
+    const req = data.requests[i];
+    const life = requestLife(req, tMs);
+    const alpha = life.phase === 'pending' ? 0.08 : life.phase === 'done' ? 0.22 : 0.72;
+    for (let li = 0; li < STACK_ORDER.length - 1; li++) {
+      const a = stackLayerPosition(req, li, i, tMs, frame);
+      const ax = a.x, ay = a.y, az = a.z;
+      const b = stackLayerPosition(req, li + 1, i, tMs, frame);
+      color.setHex(STACK_COLORS[STACK_ORDER[li + 1]]);
+      const dim = alpha * (0.45 + 0.55 * deriveHardware(req)[STACK_ORDER[li + 1]]);
+      posAttr.setXYZ(vi, ax, ay, az); colAttr.setXYZ(vi, color.r * dim, color.g * dim, color.b * dim); vi++;
+      posAttr.setXYZ(vi, b.x, b.y, b.z); colAttr.setXYZ(vi, color.r * dim, color.g * dim, color.b * dim); vi++;
+    }
+  }
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  return activeCount;
+}
+
+function ensureTopoBuffers(frame) {
+  const pf = frame.positions_flat;
+  if (!pf?.length) return false;
+  if (!topoTargetPos || topoTargetPos.length !== pf.length) {
+    topoTargetPos = new Float32Array(pf);
+    topoSmoothPos = new Float32Array(pf);
+  } else {
+    topoTargetPos.set(pf);
+  }
+  const sf = frame.street_flat;
+  if (sf?.length) {
+    if (!topoTargetStreets || topoTargetStreets.length !== sf.length) {
+      topoTargetStreets = new Float32Array(sf);
+      topoSmoothStreets = new Float32Array(sf);
+    } else {
+      topoTargetStreets.set(sf);
+    }
+  }
+  return true;
+}
+
+function stepTopologyFluid(strength = 0.16) {
+  if (!topoTargetPos || !topoSmoothPos) return;
+  for (let i = 0; i < topoSmoothPos.length; i++) {
+    topoSmoothPos[i] += (topoTargetPos[i] - topoSmoothPos[i]) * strength;
+  }
+  if (topoTargetStreets && topoSmoothStreets) {
+    for (let i = 0; i < topoSmoothStreets.length; i++) {
+      topoSmoothStreets[i] += (topoTargetStreets[i] - topoSmoothStreets[i]) * strength * 1.15;
+    }
+  }
+}
+
+function updateStreetLines() {
+  if (!topoSmoothStreets) return;
+  const meta = data.topology?.street_meta || { streets: streetLines.length, points_per_street: 36 };
+  const pts = meta.points_per_street;
+  for (let si = 0; si < streetLines.length; si++) {
+    const line = streetLines[si];
+    const attr = line.geometry.attributes.position;
+    const base = si * pts * 3;
+    for (let pi = 0; pi < pts; pi++) {
+      const j = base + pi * 3;
+      attr.setXYZ(pi, topoSmoothStreets[j], topoSmoothStreets[j + 1], topoSmoothStreets[j + 2]);
+    }
+    attr.needsUpdate = true;
+    const breath = 1 + 0.08 * Math.sin(performance.now() * 0.001 + si);
+    line.material.opacity = (si === meta.streets - 1 ? 0.18 : 0.34 + 0.12 * breath) * Math.min(data.topology?._lastBreath ?? 1.4, 1.6);
+  }
+}
+
+function paintTopologyNodes(frame) {
+  if (!topoInstanced || !topoSmoothPos) return 0;
+  const baseline = data.meta.baseline_latency_ms;
+  const rgb = [0, 0, 0];
+  const tMs = frame.tMs ?? 0;
+  const minSize = 0.28, maxSize = 2.4;
+  let activeCount = 0;
+  const pf = topoSmoothPos;
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
+
+  for (let i = 0; i < data.requests.length; i++) {
+    const req = data.requests[i];
+    const life = requestLife(req, tMs);
+    let size = minSize + req.size * (maxSize - minSize);
+    let alpha = 1;
+    let emissive = 0.08;
+
+    if (life.phase === 'pending') { size *= 0.35; alpha = 0.18; }
+    else if (life.phase === 'done') { size *= 0.72; alpha = 0.42; }
+    else {
+      activeCount++;
+      size *= 1.05 + 0.28 * Math.sin(life.progress * Math.PI) + 0.08 * pulse;
+      alpha = 0.98;
+      emissive = 0.22 + 0.18 * pulse;
+    }
+
+    dummy.position.set(pf[i * 3], pf[i * 3 + 1], pf[i * 3 + 2]);
+    dummy.scale.setScalar(size);
+    dummy.updateMatrix();
+    topoInstanced.setMatrixAt(i, dummy.matrix);
+
+    ratioColor(colorInputForMode(req, colorMode, baseline), rgb);
+    topoInstanced.setColorAt(i, color.setRGB(rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha));
+  }
+  topoInstanced.instanceMatrix.needsUpdate = true;
+  if (topoInstanced.instanceColor) topoInstanced.instanceColor.needsUpdate = true;
+
+  const posAttr = topoEdgeGeom.attributes.position;
+  const colAttr = topoEdgeGeom.attributes.color;
+  let vi = 0;
+  for (const e of data.edges) {
+    const pu = e.u * 3, pv = e.v * 3;
+    const reqU = data.requests[e.u], reqV = data.requests[e.v];
+    const edgeActive = tMs >= reqU.start_ms && tMs <= reqV.end_ms;
+    ratioColor(Math.min(
+      colorInputForMode(reqU, 'latency', baseline),
+      colorInputForMode(reqV, 'latency', baseline),
+    ), rgb);
+    const dim = (edgeActive ? 0.82 : 0.28) * (e.type === 'cache' ? 0.55 : 0.75);
+    posAttr.setXYZ(vi, pf[pu], pf[pu + 1], pf[pu + 2]); colAttr.setXYZ(vi, rgb[0] * dim, rgb[1] * dim, rgb[2] * dim); vi++;
+    posAttr.setXYZ(vi, pf[pv], pf[pv + 1], pf[pv + 2]); colAttr.setXYZ(vi, rgb[0] * dim, rgb[1] * dim, rgb[2] * dim); vi++;
+  }
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  return activeCount;
+}
+
+function updateFabric(frame) {
+  if (!fabricInstanced) return;
+  const baseline = data.meta.baseline_latency_ms;
+  const rgb = [0,0,0];
+  const pf = frame.positions_flat;
+  const minSize = 0.35, maxSize = 2.8;
+
+  for (let i = 0; i < data.requests.length; i++) {
+    const req = data.requests[i];
+    const size = minSize + req.size * (maxSize - minSize);
+    dummy.position.set(pf[i*3], pf[i*3+1], pf[i*3+2]);
+    dummy.scale.setScalar(size);
+    dummy.updateMatrix();
+    fabricInstanced.setMatrixAt(i, dummy.matrix);
+    ratioColor(colorInputForMode(req, colorMode, baseline), rgb);
+    fabricInstanced.setColorAt(i, color.setRGB(rgb[0], rgb[1], rgb[2]));
+  }
+  fabricInstanced.instanceMatrix.needsUpdate = true;
+  if (fabricInstanced.instanceColor) fabricInstanced.instanceColor.needsUpdate = true;
+
+  const posAttr = fabricEdgeGeom.attributes.position;
+  const colAttr = fabricEdgeGeom.attributes.color;
+  let vi = 0;
+  for (const e of data.edges) {
+    const pu = e.u * 3, pv = e.v * 3;
+    ratioColor(Math.min(
+      colorInputForMode(data.requests[e.u], 'latency', baseline),
+      colorInputForMode(data.requests[e.v], 'latency', baseline),
+    ), rgb);
+    const dim = e.type === 'cache' ? 0.45 : 0.7;
+    posAttr.setXYZ(vi, pf[pu], pf[pu+1], pf[pu+2]); colAttr.setXYZ(vi, rgb[0]*dim, rgb[1]*dim, rgb[2]*dim); vi++;
+    posAttr.setXYZ(vi, pf[pv], pf[pv+1], pf[pv+2]); colAttr.setXYZ(vi, rgb[0]*dim, rgb[1]*dim, rgb[2]*dim); vi++;
+  }
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+}
+
+function updateTopology(frame) {
+  if (!topoInstanced || !frame || !ensureTopoBuffers(frame)) return;
+  data.topology._lastBreath = frame.breath ?? 1;
+  const breathPulse = 0.88 + 0.14 * (frame.breath ?? 1);
+
+  if (frame.hubs_flat) {
+    for (let i = 0; i < hubMeshes.length; i++) {
+      const mesh = hubMeshes[i];
+      mesh.position.set(frame.hubs_flat[i * 3], frame.hubs_flat[i * 3 + 1], frame.hubs_flat[i * 3 + 2]);
+      const stress = frame.hub_stress?.[i] ?? 1;
+      mesh.scale.setScalar((0.8 + 0.5 * Math.min(stress, 2.3)) * breathPulse);
+    }
+  }
+
+  stepTopologyFluid(playing ? 0.14 : 0.24);
+  updateStreetLines();
+  frame._activeReplay = paintTopologyNodes(frame);
+}
+
+function updateDims() {
+  const el = document.getElementById('dims');
+  if (activeView === 'fabric') {
+    el.innerHTML = `
+      <div><span style="color:#e8814a">X</span> schedule time</div>
+      <div><span style="color:#6fa8e8">Y</span> KV prefix family</div>
+      <div><span style="color:#9fd4a8">Z</span> context depth</div>
+      <div><span style="color:#ffb46e">Size</span> input tokens</div>`;
+  } else if (activeView === 'stack') {
+    el.innerHTML = `
+      <div><span style="color:#e8814a">Layout</span> hardware stack + interconnect buses</div>
+      <div><span style="color:#6fa8e8">Spread</span> schedule · input length · token volume</div>
+      <div><span style="color:#9fd4a8">Motion</span> latency-driven flow along the data path</div>
+      <div><span style="color:#ffb46e">Layers</span> all five elements visible per request</div>`;
+  } else {
+    el.innerHTML = `
+      <div><span style="color:#e8814a">Flow</span> schedule bends through a warped street manifold</div>
+      <div><span style="color:#6fa8e8">Lanes</span> Network · Storage · CPU · GPU avenues</div>
+      <div><span style="color:#9fd4a8">Motion</span> elastic stretch + breath under active load</div>
+      <div><span style="color:#ffb46e">Glow</span> in-flight requests pulse along the streets</div>`;
+  }
+  updateHubsPanel();
+}
+
+function populateColorModes() {
+  const sel = document.getElementById('colorMode');
+  const modes = activeView === 'fabric'
+    ? [
+        ['latency', 'estimated latency'],
+        ['input_length', 'input length'],
+        ['output_length', 'output length'],
+        ['prefix_blocks', 'KV prefix blocks'],
+      ]
+    : activeView === 'stack'
+      ? [
+          ['latency', 'latency motion'],
+          ['input_length', 'input length motion'],
+          ['total_tokens', 'token volume motion'],
+          ['output_length', 'output length motion'],
+        ]
+      : [
+          ['latency', 'total latency'],
+          ['gpu', 'GPU pressure'],
+          ['network', 'network pressure'],
+          ['storage', 'storage / KV pressure'],
+          ['cpu', 'CPU scheduler pressure'],
+          ['input_length', 'input length'],
+        ];
+  sel.innerHTML = modes.map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
+  colorMode = modes[0][0];
+  updateLegend();
+}
+
+function updateLegend() {
+  const labels = {
+    latency: ['slow / heavy', 'fast / light'],
+    input_length: ['small input', 'large input'],
+    output_length: ['small output', 'large output'],
+    prefix_blocks: ['short prefix', 'long prefix'],
+    gpu: ['low GPU', 'high GPU'],
+    network: ['low network', 'high network'],
+    storage: ['low KV', 'high KV'],
+    cpu: ['low CPU', 'high CPU'],
+    total_tokens: ['few tokens', 'many tokens'],
+  };
+  const [lo, hi] = labels[colorMode] || labels.latency;
+  document.getElementById('legendLo').textContent = lo;
+  document.getElementById('legendHi').textContent = hi;
+}
+
+function setView(view) {
+  activeView = view;
+  document.getElementById('btnFabric').classList.toggle('active', view === 'fabric');
+  document.getElementById('btnTopology').classList.toggle('active', view === 'topology');
+  document.getElementById('btnStack').classList.toggle('active', view === 'stack');
+  fabricGroup.visible = view === 'fabric';
+  topologyGroup.visible = view === 'topology';
+  stackGroup.visible = view === 'stack';
+  if (view === 'stack') {
+    controls.target.set(0, 1.0, 0);
+    camera.position.set(4.2, 2.8, 4.8);
+    controls.update();
+  } else if (view === 'topology') {
+    const ext = topologyExtent();
+    const cx = (ext[0] + ext[1]) / 2, cy = (ext[2] + ext[3]) / 2, cz = (ext[4] + ext[5]) / 2;
+    const span = Math.max(ext[1] - ext[0], ext[3] - ext[2], ext[5] - ext[4]);
+    controls.target.set(cx, cy, cz);
+    camera.position.set(cx + span * 0.62, cy + span * 0.48, cz + span * 0.92);
+    controls.update();
+  } else if (data) {
+    const ext = data.meta.extent;
+    const cx = (ext[0]+ext[1])/2, cy = (ext[2]+ext[3])/2, cz = (ext[4]+ext[5])/2;
+    const span = Math.max(ext[1]-ext[0], ext[3]-ext[2], ext[5]-ext[4]);
+    controls.target.set(cx, cy, cz);
+    camera.position.set(cx + span*0.55, cy + span*0.42, cz + span*0.85);
+    controls.update();
+  }
+  bloomPass.strength = view === 'stack' ? 0.42 : view === 'topology' ? 0.38 : 0.22;
+  bloomPass.radius = view === 'stack' ? 0.55 : view === 'topology' ? 0.52 : 0.45;
+  populateColorModes();
+  updateDims();
+  updateFrame();
+}
+
+function updateFrame() {
+  if (!data) return;
+  const tMs = tNorm * data.meta.duration_ms;
+  const fabricFrame = sampleFabricWindow(tMs);
+  const topoFrame = sampleTopologyWindow(tMs, fabricFrame);
+  const stackFrame = sampleHardwareWindow(tMs);
+  const dashFrame = sampleDashboardWindow(tMs);
+
+  if (activeView === 'fabric' && fabricFrame) updateFabric(fabricFrame);
+  if (activeView === 'topology' && topoFrame) updateTopology(topoFrame);
+  if (activeView === 'stack' && stackFrame) stackFrame._activeReplay = updateStack(stackFrame);
+  if (dashFrame) updateDashboard(dashFrame);
+
+  const frame = activeView === 'fabric' ? fabricFrame : activeView === 'stack' ? stackFrame : topoFrame;
+  if (frame) {
+    document.getElementById('tlabel').textContent = formatTime(tMs);
+    const activeText = frame._activeReplay != null
+      ? `${frame._activeReplay} in-flight · ${frame.active_requests} window-active`
+      : `${frame.active_requests} active`;
+    document.getElementById('activeLabel').textContent =
+      `${activeText} · breath ${frame.breath.toFixed(2)}× · ${data.requests.length.toLocaleString()} nodes`;
+  }
+}
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+let bloomPass = new UnrealBloomPass(new THREE.Vector2(1,1), 0.22, 0.45, 0.82);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+scene.add(new THREE.AmbientLight(0x405068, 0.95));
+const key = new THREE.DirectionalLight(0xe8eef6, 1.05);
+key.position.set(4, 6, 5);
+scene.add(key);
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h, false);
+  composer.setSize(w, h);
+  updateFrame();
+}
+
+function setData(payload) {
+  if (!payload.topology || !payload.hardware) {
+    alert('This layout is missing topology/hardware sections. Re-export with the latest export_mooncake_trace_layout.py');
+    return;
+  }
+  data = payload;
+  nPrefixLanes = payload.meta.n_prefix_lanes
+    || new Set(payload.requests.map(r => r.prefix_lane)).size
+    || 1;
+  document.getElementById('load').classList.add('hidden');
+  document.getElementById('title').textContent = payload.meta.title || 'Mooncake trace explorer';
+  document.getElementById('subtitle').textContent =
+    `${payload.meta.n_requests.toLocaleString()} requests · ${payload.meta.duration_s.toLocaleString()}s · Fabric · Streets · Stack`;
+  initDashboard();
+  document.getElementById('dashboard').classList.add('visible');
+  buildFabricScene();
+  buildTopologyScene();
+  buildStackScene();
+  setView(activeView);
+  tNorm = 0;
+}
+
+async function loadFromUrl(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
+  setData(await res.json());
+}
+
+function tick(now) {
+  if (playing && data) {
+    const speed = Math.pow(10, parseFloat(document.getElementById('speed').value));
+    tNorm += ((now - lastFrame) / 1000 * speed) / Math.max(data.meta.duration_ms / 1000, 1);
+    if (tNorm >= 1) tNorm -= 1;
+    document.getElementById('time').value = tNorm;
+    updateFrame();
+  } else if (data && dashInitialized) {
+    const dashFrame = sampleDashboardWindow(tNorm * data.meta.duration_ms);
+    if (dashFrame) updateDashboard(dashFrame);
+  }
+  if (!playing && data) {
+    if (activeView === 'stack' && stackLayerMeshes.length) {
+      const frame = sampleHardwareWindow(tNorm * data.meta.duration_ms);
+      if (frame) updateStack(frame);
+    } else if (activeView === 'topology' && topoTargetPos) {
+      stepTopologyFluid(0.1);
+      updateStreetLines();
+      paintTopologyNodes({ tMs: tNorm * data.meta.duration_ms, breath: data.topology?._lastBreath ?? 1 });
+    }
+  }
+  lastFrame = now;
+  controls.update();
+  composer.render();
+  requestAnimationFrame(tick);
+}
+
+document.getElementById('btnFabric').addEventListener('click', () => setView('fabric'));
+document.getElementById('btnTopology').addEventListener('click', () => setView('topology'));
+document.getElementById('btnStack').addEventListener('click', () => setView('stack'));
+document.getElementById('play').addEventListener('click', () => {
+  playing = !playing;
+  document.getElementById('play').textContent = playing ? '⏸' : '▶';
+});
+document.getElementById('time').addEventListener('input', e => { tNorm = +e.target.value; updateFrame(); });
+document.getElementById('speed').addEventListener('input', e => {
+  document.getElementById('speedlab').textContent = `${Math.pow(10,+e.target.value).toFixed(2)}×`;
+});
+document.getElementById('colorMode').addEventListener('change', e => { colorMode = e.target.value; updateLegend(); updateFrame(); });
+document.getElementById('file').addEventListener('change', async e => {
+  const file = e.target.files?.[0];
+  if (file) setData(JSON.parse(await file.text()));
+});
+
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(tick);
+
+const params = new URLSearchParams(location.search);
+const viewParam = params.get('view');
+if (viewParam === 'topology') activeView = 'topology';
+if (viewParam === 'stack') activeView = 'stack';
+const dataUrl = params.get('data');
+if (dataUrl) loadFromUrl(dataUrl).catch(err => { document.getElementById('subtitle').textContent = err.message; });
+</script>
+</body>
+</html>
