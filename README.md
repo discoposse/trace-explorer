@@ -17,6 +17,8 @@ Direct links:
 
 - [Streets view](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=mooncake_preview.json&view=topology)
 - [Hardware stack](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=mooncake_preview.json&view=stack)
+- [Scatter plot](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=mooncake_preview.json&view=scatter)
+- [Surface plot](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=mooncake_preview.json&view=surface)
 
 ## Update the demo
 

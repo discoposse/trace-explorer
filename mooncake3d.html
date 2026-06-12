@@ -7,7 +7,8 @@
   html, body { margin: 0; height: 100%; background: #05070c; overflow: hidden;
                font: 13px/1.4 -apple-system, "SF Mono", Menlo, sans-serif; color: #9fb2c8; }
   #c { display: block; width: 100%; height: 100%; }
-  #views { position: fixed; left: 16px; top: 14px; display: flex; gap: 8px; z-index: 5; }
+  #views { position: fixed; left: 16px; top: 14px; display: flex; flex-wrap: wrap; gap: 8px;
+            max-width: 520px; z-index: 5; }
   #views button { border-radius: 8px; border: 1px solid #2a3a4f; background: #14202e; color: #9fb2c8;
                   padding: 8px 14px; cursor: pointer; font: 12px Menlo, monospace; }
   #views button.active { color: #e8eef6; border-color: #e8814a; background: #1c2a3c; }
@@ -73,10 +74,12 @@
   <button id="btnFabric" class="active">Fabric</button>
   <button id="btnTopology">Streets</button>
   <button id="btnStack">Stack</button>
+  <button id="btnScatter">Scatter</button>
+  <button id="btnSurface">Surface</button>
 </div>
 <div id="hud">
   <h1 id="title">Trace explorer</h1>
-  <div class="sub" id="subtitle">Fabric · Streets · Hardware stack connectivity views</div>
+  <div class="sub" id="subtitle">Fabric · Streets · Stack · Scatter · Surface</div>
 </div>
 <div id="dims"></div>
 <div id="hubs"></div>
@@ -139,9 +142,13 @@ const tmpVec = new THREE.Vector3();
 const fabricGroup = new THREE.Group();
 const topologyGroup = new THREE.Group();
 const stackGroup = new THREE.Group();
+const scatterGroup = new THREE.Group();
+const surfaceGroup = new THREE.Group();
 scene.add(fabricGroup);
 scene.add(topologyGroup);
 scene.add(stackGroup);
+scene.add(scatterGroup);
+scene.add(surfaceGroup);
 
 let fabricInstanced = null;
 let fabricEdgeGeom = null;
@@ -170,6 +177,16 @@ let stackBusLines = null;
 let stackFlowGeom = null;
 let stackFlowLines = null;
 const stackLayerPosCache = Array.from({ length: 5 }, () => new THREE.Vector3());
+
+const SURFACE_TIME_BINS = 48;
+let scatterInstanced = null;
+let scatterMetricCache = null;
+let surfaceMesh = null;
+let surfaceGeom = null;
+let surfaceHeights = null;
+let surfaceCounts = null;
+let surfaceLaneBins = 16;
+let surfaceHeightMode = 'latency';
 
 const DASH_NUMERIC_KEYS = [
   'ttft_live_ms', 'ttft_p50_ms', 'ttft_p90_ms', 'itl_p50_ms', 'itl_p90_ms',
@@ -219,11 +236,32 @@ function metricValue(req, mode) {
   if (mode === 'input_length') return req.input_length;
   if (mode === 'output_length') return req.output_length;
   if (mode === 'prefix_blocks') return req.prefix_blocks;
+  if (mode === 'total_tokens') return req.total_tokens;
+  if (mode === 'ttft_ms') return req.ttft_ms || 0;
+  if (mode === 'itl_ms') return req.itl_ms || 0;
   if (mode === 'gpu') return req.pipeline?.gpu ?? 0.25;
   if (mode === 'network') return req.pipeline?.network ?? 0.25;
   if (mode === 'storage') return req.pipeline?.storage ?? 0.25;
   if (mode === 'cpu') return req.pipeline?.cpu ?? 0.25;
   return req.latency_ms;
+}
+
+function metricBaseline(mode) {
+  const b = data?.meta?.baselines || {};
+  if (mode === 'ttft_ms') return b.ttft_ms || data.meta.baseline_latency_ms;
+  if (mode === 'itl_ms') return b.itl_ms || 1;
+  if (mode === 'input_length') return data.meta.max_isl || 1;
+  if (mode === 'output_length') return Math.max(...data.requests.map(r => r.output_length), 1);
+  if (mode === 'total_tokens') return data.meta.max_tokens || 1;
+  if (mode === 'prefix_blocks') return Math.max(...data.requests.map(r => r.prefix_blocks), 1);
+  return data.meta.baseline_latency_ms;
+}
+
+function requestHeightMetric(req, mode) {
+  const baseline = metricBaseline(mode);
+  const v = metricValue(req, mode);
+  if (['gpu', 'network', 'storage', 'cpu'].includes(mode)) return Math.max(0.2, v * 2.2);
+  return Math.min(2.8, v / Math.max(baseline, 1e-6));
 }
 
 function metricRatio(req, mode, baseline) {
@@ -234,7 +272,7 @@ function metricRatio(req, mode, baseline) {
 
 function colorInputForMode(req, mode, baseline) {
   const v = metricValue(req, mode);
-  if (mode === 'latency') return baseline / Math.max(v, 1e-6);
+  if (mode === 'latency' || mode === 'ttft_ms' || mode === 'itl_ms') return baseline / Math.max(v, 1e-6);
   const ratio = metricRatio(req, mode, baseline);
   if (['gpu','network','storage','cpu'].includes(mode)) return ratio;
   return 2.1 - Math.min(1.8, ratio);
@@ -520,6 +558,226 @@ function buildFabricScene() {
   camera.position.set(cx + span*0.55, cy + span*0.42, cz + span*0.85);
 }
 
+function buildScatterMetricCache() {
+  const dur = data.meta.duration_ms;
+  const maxIsl = data.meta.max_isl || Math.max(...data.requests.map(r => r.input_length), 1);
+  const maxOut = Math.max(...data.requests.map(r => r.output_length), 1);
+  const logMax = Math.log10(Math.max(maxIsl, 1));
+  scatterMetricCache = data.requests.map((req, idx) => {
+    const laneNorm = nPrefixLanes > 1 ? (req.prefix_lane + 1) / nPrefixLanes : 0.5;
+    return {
+      x: (req.start_ms / dur) * 2 - 1,
+      y: laneNorm * 2 - 1,
+      z: (Math.log10(Math.max(req.input_length, 1)) / logMax) * 2 - 1,
+      size: 0.28 + 0.72 * (req.output_length / maxOut),
+      jitter: 0.018 * Math.sin(idx * 2.17 + req.prefix_lane * 0.8),
+    };
+  });
+}
+
+function buildScatterScene() {
+  clearGroup(scatterGroup);
+  buildScatterMetricCache();
+  const n = data.requests.length;
+  const geo = new THREE.SphereGeometry(0.014, 8, 8);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    emissive: 0x0a0a12,
+    metalness: 0.1,
+    roughness: 0.45,
+  });
+  scatterInstanced = new THREE.InstancedMesh(geo, mat, n);
+  scatterInstanced.frustumCulled = false;
+  scatterInstanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  scatterInstanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+  scatterGroup.add(scatterInstanced);
+
+  const grid = new THREE.GridHelper(2.4, 24, 0x2a3a4f, 0x16202e);
+  grid.position.y = -1.05;
+  scatterGroup.add(grid);
+
+  const axisMat = new THREE.LineBasicMaterial({ color: 0x3a4a5f, transparent: true, opacity: 0.65 });
+  const axisGeom = new THREE.BufferGeometry();
+  axisGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+    -1.2, -1.05, -1.2, 1.2, -1.05, -1.2,
+    -1.2, -1.05, -1.2, -1.2, -1.05, 1.2,
+    -1.2, -1.05, -1.2, -1.2, 1.2, -1.2,
+  ], 3));
+  scatterGroup.add(new THREE.LineSegments(axisGeom, axisMat));
+
+  controls.target.set(0, 0, 0);
+  camera.position.set(2.4, 1.9, 2.6);
+}
+
+function buildSurfaceHeights(mode) {
+  surfaceHeightMode = mode;
+  const lanes = [...new Set(data.requests.map(r => r.prefix_lane))].sort((a, b) => a - b);
+  const laneIndex = Object.fromEntries(lanes.map((l, i) => [l, i]));
+  const tb = SURFACE_TIME_BINS;
+  const lb = surfaceLaneBins;
+  surfaceHeights = new Float32Array(tb * lb);
+  surfaceCounts = new Uint16Array(tb * lb);
+  const dur = data.meta.duration_ms;
+
+  for (const req of data.requests) {
+    const ti = Math.min(tb - 1, Math.floor((req.start_ms / dur) * tb));
+    const li = Math.min(lb - 1, Math.floor(((laneIndex[req.prefix_lane] ?? 0) / Math.max(lanes.length - 1, 1)) * (lb - 1)));
+    const idx = li * tb + ti;
+    const h = requestHeightMetric(req, mode);
+    if (h > surfaceHeights[idx]) surfaceHeights[idx] = h;
+    surfaceCounts[idx]++;
+  }
+
+  const smoothed = new Float32Array(surfaceHeights);
+  for (let li = 0; li < lb; li++) {
+    for (let ti = 0; ti < tb; ti++) {
+      let sum = 0, cnt = 0;
+      for (let dj = -1; dj <= 1; dj++) {
+        for (let di = -1; di <= 1; di++) {
+          const nj = li + dj, ni = ti + di;
+          if (nj < 0 || nj >= lb || ni < 0 || ni >= tb) continue;
+          const v = surfaceHeights[nj * tb + ni];
+          if (v > 0) { sum += v; cnt++; }
+        }
+      }
+      if (cnt) smoothed[li * tb + ti] = sum / cnt;
+    }
+  }
+  surfaceHeights = smoothed;
+}
+
+function buildSurfaceScene() {
+  clearGroup(surfaceGroup);
+  surfaceMesh = null;
+  surfaceGeom = null;
+
+  const lanes = [...new Set(data.requests.map(r => r.prefix_lane))];
+  surfaceLaneBins = Math.min(32, Math.max(lanes.length, 8));
+  buildSurfaceHeights('latency');
+
+  const tb = SURFACE_TIME_BINS;
+  const lb = surfaceLaneBins;
+  surfaceGeom = new THREE.PlaneGeometry(2.4, 2.4, tb - 1, lb - 1);
+  surfaceGeom.rotateX(-Math.PI / 2);
+  const colors = new Float32Array(surfaceGeom.attributes.position.count * 3);
+  surfaceGeom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  surfaceMesh = new THREE.Mesh(
+    surfaceGeom,
+    new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      metalness: 0.18,
+      roughness: 0.62,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.94,
+    }),
+  );
+  surfaceMesh.frustumCulled = false;
+  surfaceGroup.add(surfaceMesh);
+
+  const grid = new THREE.GridHelper(2.6, 26, 0x2a3a4f, 0x16202e);
+  grid.position.y = -0.02;
+  surfaceGroup.add(grid);
+
+  controls.target.set(0, 0.35, 0);
+  camera.position.set(2.9, 2.3, 2.9);
+}
+
+function updateScatter(frame) {
+  if (!scatterInstanced || !scatterMetricCache) return 0;
+  const rgb = [0, 0, 0];
+  const tMs = frame.tMs ?? 0;
+  const minSize = 0.18, maxSize = 1.6;
+  let activeCount = 0;
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
+  const heightMode = colorMode === 'input_length' || colorMode === 'output_length' || colorMode === 'prefix_blocks'
+    ? 'latency'
+    : colorMode;
+
+  for (let i = 0; i < data.requests.length; i++) {
+    const req = data.requests[i];
+    const m = scatterMetricCache[i];
+    const life = requestLife(req, tMs);
+    let size = minSize + m.size * (maxSize - minSize);
+    let alpha = 1;
+    let yLift = requestHeightMetric(req, heightMode) * 0.42;
+
+    if (life.phase === 'pending') {
+      size *= 0.12;
+      alpha = 0.06;
+      yLift *= 0.05;
+    } else if (life.phase === 'done') {
+      size *= 0.82;
+      alpha = 0.55;
+    } else {
+      activeCount++;
+      size *= 1.08 + 0.2 * Math.sin(life.progress * Math.PI) + 0.08 * pulse;
+      alpha = 0.98;
+      yLift *= 1.05 + 0.12 * pulse;
+    }
+
+    dummy.position.set(m.x + m.y * 0.05 + m.jitter, yLift, m.z + m.jitter * 0.6);
+    dummy.scale.setScalar(size);
+    dummy.updateMatrix();
+    scatterInstanced.setMatrixAt(i, dummy.matrix);
+
+    ratioColor(colorInputForMode(req, colorMode, metricBaseline(colorMode)), rgb);
+    scatterInstanced.setColorAt(i, color.setRGB(rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha));
+  }
+  scatterInstanced.instanceMatrix.needsUpdate = true;
+  if (scatterInstanced.instanceColor) scatterInstanced.instanceColor.needsUpdate = true;
+  return activeCount;
+}
+
+function updateSurface(frame) {
+  if (!surfaceGeom || !surfaceHeights) return 0;
+  const heightMode = ['ttft_ms', 'itl_ms', 'input_length', 'output_length', 'total_tokens', 'prefix_blocks'].includes(colorMode)
+    ? colorMode
+    : 'latency';
+  if (surfaceHeightMode !== heightMode) buildSurfaceHeights(heightMode);
+
+  const pos = surfaceGeom.attributes.position;
+  const col = surfaceGeom.attributes.color;
+  const tb = SURFACE_TIME_BINS;
+  const lb = surfaceLaneBins;
+  const tMs = frame.tMs ?? 0;
+  const dur = data.meta.duration_ms;
+  const timeCut = (tMs / dur) * 2 - 1;
+  const breath = frame.breath ?? 1;
+  const rgb = [0, 0, 0];
+  let activeCount = 0;
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.0035);
+
+  for (const req of data.requests) {
+    if (req.start_ms <= tMs && tMs <= req.end_ms) activeCount++;
+  }
+
+  for (let j = 0; j <= lb - 1; j++) {
+    for (let i = 0; i <= tb - 1; i++) {
+      const vi = j * tb + i;
+      const x = -1.2 + (i / Math.max(tb - 1, 1)) * 2.4;
+      const z = -1.2 + (j / Math.max(lb - 1, 1)) * 2.4;
+      const cellX = (i + 0.5) / tb * 2 - 1;
+      const revealed = cellX <= timeCut + 0.04;
+      const idx = j * tb + i;
+      let h = revealed ? surfaceHeights[idx] : 0;
+      if (revealed && h > 0) h *= 0.34 * (0.92 + 0.14 * (breath - 1));
+      if (revealed && surfaceCounts[idx] > 0) h += 0.02 * Math.min(surfaceCounts[idx], 6);
+      const y = h * (revealed ? 1 : 0) + (revealed && h > 0 ? 0.03 * pulse : 0);
+      pos.setXYZ(vi, x, y, z);
+      const ratio = h > 0 ? Math.min(2.5, h) : 0.2;
+      ratioColor(ratio, rgb);
+      const dim = revealed ? 0.45 + 0.55 * Math.min(h / 0.9, 1) : 0.08;
+      col.setXYZ(vi, rgb[0] * dim, rgb[1] * dim, rgb[2] * dim);
+    }
+  }
+  pos.needsUpdate = true;
+  col.needsUpdate = true;
+  surfaceGeom.computeVertexNormals();
+  return activeCount;
+}
+
 function buildTopologyScene() {
   clearGroup(topologyGroup);
   hubMeshes.length = 0;
@@ -699,6 +957,18 @@ function updateHubsPanel() {
       <div class="row"><span class="dot" style="background:#c9a227"></span>Storage / KV cache</div>
       <div class="row"><span class="dot" style="background:#9fb2c8"></span>CPU scheduler</div>
       <div class="row"><span class="dot" style="background:#76b900"></span>GPU compute</div>`;
+    el.style.display = 'block';
+  } else if (activeView === 'scatter') {
+    el.innerHTML = `
+      <div class="row"><span class="dot" style="background:#e8814a"></span>Time (X)</div>
+      <div class="row"><span class="dot" style="background:#6fa8e8"></span>Metric height (Y)</div>
+      <div class="row"><span class="dot" style="background:#9fd4a8"></span>Input depth (Z)</div>`;
+    el.style.display = 'block';
+  } else if (activeView === 'surface') {
+    el.innerHTML = `
+      <div class="row"><span class="dot" style="background:#e8814a"></span>Time (X)</div>
+      <div class="row"><span class="dot" style="background:#6fa8e8"></span>Prefix lane (Z)</div>
+      <div class="row"><span class="dot" style="background:#ffb46e"></span>Peak metric (Y)</div>`;
     el.style.display = 'block';
   } else {
     el.style.display = 'none';
@@ -1021,6 +1291,18 @@ function updateDims() {
       <div><span style="color:#6fa8e8">Spread</span> schedule · input length · token volume</div>
       <div><span style="color:#9fd4a8">Motion</span> latency-driven flow along the data path</div>
       <div><span style="color:#ffb46e">Layers</span> all five elements visible per request</div>`;
+  } else if (activeView === 'scatter') {
+    el.innerHTML = `
+      <div><span style="color:#e8814a">X</span> schedule time</div>
+      <div><span style="color:#6fa8e8">Y</span> latency / TTFT / ITL height</div>
+      <div><span style="color:#9fd4a8">Z</span> input context depth (log)</div>
+      <div><span style="color:#ffb46e">Size</span> output tokens · replay reveals points over time</div>`;
+  } else if (activeView === 'surface') {
+    el.innerHTML = `
+      <div><span style="color:#e8814a">X</span> schedule time</div>
+      <div><span style="color:#6fa8e8">Z</span> KV prefix family lane</div>
+      <div><span style="color:#9fd4a8">Y</span> peak metric per time × lane cell</div>
+      <div><span style="color:#ffb46e">Sweep</span> surface grows with playback time</div>`;
   } else {
     el.innerHTML = `
       <div><span style="color:#e8814a">Flow</span> schedule bends through a warped street manifold</div>
@@ -1047,14 +1329,24 @@ function populateColorModes() {
           ['total_tokens', 'token volume motion'],
           ['output_length', 'output length motion'],
         ]
-      : [
-          ['latency', 'total latency'],
-          ['gpu', 'GPU pressure'],
-          ['network', 'network pressure'],
-          ['storage', 'storage / KV pressure'],
-          ['cpu', 'CPU scheduler pressure'],
-          ['input_length', 'input length'],
-        ];
+      : activeView === 'scatter' || activeView === 'surface'
+        ? [
+            ['latency', 'latency'],
+            ['ttft_ms', 'TTFT'],
+            ['itl_ms', 'ITL'],
+            ['input_length', 'input length'],
+            ['output_length', 'output length'],
+            ['total_tokens', 'total tokens'],
+            ['prefix_blocks', 'KV prefix blocks'],
+          ]
+        : [
+            ['latency', 'total latency'],
+            ['gpu', 'GPU pressure'],
+            ['network', 'network pressure'],
+            ['storage', 'storage / KV pressure'],
+            ['cpu', 'CPU scheduler pressure'],
+            ['input_length', 'input length'],
+          ];
   sel.innerHTML = modes.map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
   colorMode = modes[0][0];
   updateLegend();
@@ -1071,6 +1363,8 @@ function updateLegend() {
     storage: ['low KV', 'high KV'],
     cpu: ['low CPU', 'high CPU'],
     total_tokens: ['few tokens', 'many tokens'],
+    ttft_ms: ['slow TTFT', 'fast TTFT'],
+    itl_ms: ['slow ITL', 'fast ITL'],
   };
   const [lo, hi] = labels[colorMode] || labels.latency;
   document.getElementById('legendLo').textContent = lo;
@@ -1082,9 +1376,13 @@ function setView(view) {
   document.getElementById('btnFabric').classList.toggle('active', view === 'fabric');
   document.getElementById('btnTopology').classList.toggle('active', view === 'topology');
   document.getElementById('btnStack').classList.toggle('active', view === 'stack');
+  document.getElementById('btnScatter').classList.toggle('active', view === 'scatter');
+  document.getElementById('btnSurface').classList.toggle('active', view === 'surface');
   fabricGroup.visible = view === 'fabric';
   topologyGroup.visible = view === 'topology';
   stackGroup.visible = view === 'stack';
+  scatterGroup.visible = view === 'scatter';
+  surfaceGroup.visible = view === 'surface';
   if (view === 'stack') {
     controls.target.set(0, 1.0, 0);
     camera.position.set(4.2, 2.8, 4.8);
@@ -1096,6 +1394,14 @@ function setView(view) {
     controls.target.set(cx, cy, cz);
     camera.position.set(cx + span * 0.62, cy + span * 0.48, cz + span * 0.92);
     controls.update();
+  } else if (view === 'scatter') {
+    controls.target.set(0, 0, 0);
+    camera.position.set(2.4, 1.9, 2.6);
+    controls.update();
+  } else if (view === 'surface') {
+    controls.target.set(0, 0.35, 0);
+    camera.position.set(2.9, 2.3, 2.9);
+    controls.update();
   } else if (data) {
     const ext = data.meta.extent;
     const cx = (ext[0]+ext[1])/2, cy = (ext[2]+ext[3])/2, cz = (ext[4]+ext[5])/2;
@@ -1104,8 +1410,16 @@ function setView(view) {
     camera.position.set(cx + span*0.55, cy + span*0.42, cz + span*0.85);
     controls.update();
   }
-  bloomPass.strength = view === 'stack' ? 0.42 : view === 'topology' ? 0.38 : 0.22;
-  bloomPass.radius = view === 'stack' ? 0.55 : view === 'topology' ? 0.52 : 0.45;
+  bloomPass.strength = view === 'stack' ? 0.42
+    : view === 'topology' ? 0.38
+    : view === 'scatter' ? 0.28
+    : view === 'surface' ? 0.32
+    : 0.22;
+  bloomPass.radius = view === 'stack' ? 0.55
+    : view === 'topology' ? 0.52
+    : view === 'scatter' ? 0.48
+    : view === 'surface' ? 0.5
+    : 0.45;
   populateColorModes();
   updateDims();
   updateFrame();
@@ -1122,9 +1436,14 @@ function updateFrame() {
   if (activeView === 'fabric' && fabricFrame) updateFabric(fabricFrame);
   if (activeView === 'topology' && topoFrame) updateTopology(topoFrame);
   if (activeView === 'stack' && stackFrame) stackFrame._activeReplay = updateStack(stackFrame);
+  if (activeView === 'scatter' && fabricFrame) fabricFrame._activeReplay = updateScatter(fabricFrame);
+  if (activeView === 'surface' && fabricFrame) fabricFrame._activeReplay = updateSurface(fabricFrame);
   if (dashFrame) updateDashboard(dashFrame);
 
-  const frame = activeView === 'fabric' ? fabricFrame : activeView === 'stack' ? stackFrame : topoFrame;
+  const frame = activeView === 'fabric' ? fabricFrame
+    : activeView === 'stack' ? stackFrame
+    : activeView === 'scatter' || activeView === 'surface' ? fabricFrame
+    : topoFrame;
   if (frame) {
     document.getElementById('tlabel').textContent = formatTime(tMs);
     const activeText = frame._activeReplay != null
@@ -1167,12 +1486,14 @@ function setData(payload) {
   document.getElementById('load').classList.add('hidden');
   document.getElementById('title').textContent = payload.meta.title || 'Trace explorer';
   document.getElementById('subtitle').textContent =
-    `${payload.meta.n_requests.toLocaleString()} requests · ${payload.meta.duration_s.toLocaleString()}s · Fabric · Streets · Stack`;
+    `${payload.meta.n_requests.toLocaleString()} requests · ${payload.meta.duration_s.toLocaleString()}s · Fabric · Streets · Stack · Scatter · Surface`;
   initDashboard();
   document.getElementById('dashboard').classList.add('visible');
   buildFabricScene();
   buildTopologyScene();
   buildStackScene();
+  buildScatterScene();
+  buildSurfaceScene();
   setView(activeView);
   tNorm = 0;
 }
@@ -1202,6 +1523,10 @@ function tick(now) {
       stepTopologyFluid(0.1);
       updateStreetLines();
       paintTopologyNodes({ tMs: tNorm * data.meta.duration_ms, breath: data.topology?._lastBreath ?? 1 });
+    } else if (activeView === 'scatter' && scatterInstanced) {
+      updateScatter(sampleFabricWindow(tNorm * data.meta.duration_ms));
+    } else if (activeView === 'surface' && surfaceGeom) {
+      updateSurface(sampleFabricWindow(tNorm * data.meta.duration_ms));
     }
   }
   lastFrame = now;
@@ -1213,6 +1538,8 @@ function tick(now) {
 document.getElementById('btnFabric').addEventListener('click', () => setView('fabric'));
 document.getElementById('btnTopology').addEventListener('click', () => setView('topology'));
 document.getElementById('btnStack').addEventListener('click', () => setView('stack'));
+document.getElementById('btnScatter').addEventListener('click', () => setView('scatter'));
+document.getElementById('btnSurface').addEventListener('click', () => setView('surface'));
 document.getElementById('play').addEventListener('click', () => {
   playing = !playing;
   document.getElementById('play').textContent = playing ? '⏸' : '▶';
@@ -1235,6 +1562,8 @@ const params = new URLSearchParams(location.search);
 const viewParam = params.get('view');
 if (viewParam === 'topology') activeView = 'topology';
 if (viewParam === 'stack') activeView = 'stack';
+if (viewParam === 'scatter') activeView = 'scatter';
+if (viewParam === 'surface') activeView = 'surface';
 const dataUrl = params.get('data');
 if (dataUrl) loadFromUrl(dataUrl).catch(err => { document.getElementById('subtitle').textContent = err.message; });
 </script>
