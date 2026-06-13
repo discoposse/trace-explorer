@@ -1938,6 +1938,12 @@ function setTracePickerValue(traceId) {
   if (traceById(traceId)) sel.value = traceId;
 }
 
+const LEGACY_TRACE_IDS = {
+  toolagent: 'mooncake-toolagent',
+  conversation: 'mooncake-conversation',
+  synthetic: 'mooncake-synthetic',
+};
+
 function resolveInitialTraceId(dataParam) {
   if (dataParam) {
     const match = traceByFile(dataParam);
@@ -1946,7 +1952,8 @@ function resolveInitialTraceId(dataParam) {
   }
   try {
     const stored = localStorage.getItem(TRACE_STORAGE_KEY);
-    if (stored && traceById(stored)) return stored;
+    const migrated = LEGACY_TRACE_IDS[stored] || stored;
+    if (migrated && traceById(migrated)) return migrated;
   } catch (_) { /* private browsing */ }
   return DEFAULT_TRACE_ID;
 }
