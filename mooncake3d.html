@@ -63,6 +63,17 @@
   #hubs .dot { width: 8px; height: 8px; border-radius: 50%; }
   #load { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(5,7,12,.92); z-index: 20; }
   #load.hidden { display: none; }
+  #feastHud { position: fixed; top: 72px; left: 50%; transform: translateX(-50%); display: none;
+               background: rgba(8,12,19,.92); border: 1px solid #1d2735; border-radius: 10px;
+               padding: 8px 16px; font-size: 11px; z-index: 6; pointer-events: none; text-align: center;
+               backdrop-filter: blur(8px); min-width: 280px; }
+  #feastHud.visible { display: block; }
+  #feastHud .glow { font-weight: 700; font-variant-numeric: tabular-nums; transition: color .4s; }
+  #feastHud.chaos .glow { color: #ff5a3c; text-shadow: 0 0 14px rgba(255,90,60,.55); }
+  #feastHud.harmony .glow { color: #6fd4a8; text-shadow: 0 0 14px rgba(111,212,168,.45); }
+  #optimizeRow { display: none; align-items: center; gap: 8px; }
+  #optimizeRow.visible { display: flex; }
+  #optimizeLevel { width: 120px; accent-color: #b366ff; }
 </style>
 </head>
 <body>
@@ -80,10 +91,11 @@
   <button id="btnStack">Stack</button>
   <button id="btnScatter">Scatter</button>
   <button id="btnSurface">Surface</button>
+  <button id="btnFeast">Feast</button>
 </div>
 <div id="hud">
   <h1 id="title">Trace explorer</h1>
-  <div class="sub" id="subtitle">Fabric · Streets · Stack · Scatter · Surface</div>
+  <div class="sub" id="subtitle">Fabric · Streets · Stack · Scatter · Surface · Feast</div>
   <div id="traceRow">
     <label class="lab" for="tracePick">Trace</label>
     <select id="tracePick" aria-label="Select trace to explore"></select>
@@ -96,6 +108,12 @@
   <div class="sub" id="activeLabel">0 active</div>
 </div>
 <div id="dashboard"></div>
+<div id="feastHud">
+  <div>Resource Feast · <span class="glow" id="feastContention">—</span> contention</div>
+  <div style="margin-top:4px;color:#6e8096">
+    <span id="feastTput">—</span> tok/s · latency <span id="feastLat">—</span> · alloc <span id="feastAlloc">—</span>
+  </div>
+</div>
 <div id="panel">
   <button id="play">▶</button>
   <input id="time" type="range" min="0" max="1" step="any" value="0">
@@ -104,6 +122,11 @@
   <span class="lab">speed</span>
   <input id="speed" type="range" min="-2" max="1.7" step="0.01" value="-0.3" style="width:100px">
   <span class="lab" id="speedlab">1×</span>
+  <span id="optimizeRow">
+    <span class="lab">allocation</span>
+    <input id="optimizeLevel" type="range" min="0" max="1" step="0.01" value="0.15" title="Chaos → optimized harmony">
+    <span class="lab" id="optimizelab">chaos</span>
+  </span>
 </div>
 <div id="legend">
   <div class="bar"></div>
@@ -152,11 +175,13 @@ const topologyGroup = new THREE.Group();
 const stackGroup = new THREE.Group();
 const scatterGroup = new THREE.Group();
 const surfaceGroup = new THREE.Group();
+const feastGroup = new THREE.Group();
 scene.add(fabricGroup);
 scene.add(topologyGroup);
 scene.add(stackGroup);
 scene.add(scatterGroup);
 scene.add(surfaceGroup);
+scene.add(feastGroup);
 
 let fabricInstanced = null;
 let fabricEdgeGeom = null;
@@ -195,6 +220,21 @@ let surfaceHeights = null;
 let surfaceCounts = null;
 let surfaceLaneBins = 16;
 let surfaceHeightMode = 'latency';
+
+const FEAST_HUB_ORDER = ['gpu', 'network', 'storage', 'kv_cache', 'hbm'];
+let feastInstanced = null;
+let feastHubMeshes = [];
+let feastTubeGeom = null;
+let feastTubeLines = null;
+let feastSpringGeom = null;
+let feastSpringLines = null;
+let feastBodies = [];
+let feastSprings = [];
+let feastHubPos = [];
+let feastOptimize = 0.15;
+let feastCameraShake = 0;
+let feastBaseCamera = null;
+let lastFeastStep = performance.now();
 
 const DASH_NUMERIC_KEYS = [
   'ttft_live_ms', 'ttft_p50_ms', 'ttft_p90_ms', 'itl_p50_ms', 'itl_p90_ms',
@@ -797,6 +837,332 @@ function updateSurface(frame) {
   return activeCount;
 }
 
+function feastChaos() {
+  return Math.max(0, Math.min(1, 1 - feastOptimize));
+}
+
+function feastTint(rgb, optimize) {
+  const cool = Math.max(0, (optimize - 0.35) / 0.65);
+  rgb[0] = rgb[0] * (1 - cool) + 0.38 * cool;
+  rgb[1] = rgb[1] * (1 - cool) + 0.72 * cool;
+  rgb[2] = rgb[2] * (1 - cool) + 0.92 * cool;
+}
+
+function buildFeastScene() {
+  clearGroup(feastGroup);
+  feastHubMeshes = [];
+  feastBodies = [];
+  feastSprings = (data.edges || []).filter(e => e.type === 'cache' || e.type === 'session');
+
+  const ext = data.meta.extent;
+  const cx = (ext[0] + ext[1]) / 2;
+  const cy = (ext[2] + ext[3]) / 2;
+  const cz = (ext[4] + ext[5]) / 2;
+  const span = Math.max(ext[1] - ext[0], ext[3] - ext[2], ext[5] - ext[4], 0.5);
+
+  const hubLayout = {
+    gpu: [0, 0.12, 0],
+    network: [-0.62, 0.05, 0.42],
+    storage: [0.58, -0.08, 0.38],
+    kv_cache: [-0.42, 0.22, -0.48],
+    hbm: [0.48, -0.18, -0.42],
+  };
+  feastHubPos = FEAST_HUB_ORDER.map(id => {
+    const o = hubLayout[id];
+    return [cx + o[0] * span, cy + o[1] * span, cz + o[2] * span];
+  });
+
+  for (let hi = 0; hi < FEAST_HUB_ORDER.length; hi++) {
+    const id = FEAST_HUB_ORDER[hi];
+    const p = feastHubPos[hi];
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 18, 18),
+      new THREE.MeshStandardMaterial({
+        color: STACK_COLORS[id],
+        emissive: STACK_COLORS[id],
+        emissiveIntensity: 0.55,
+        metalness: 0.35,
+        roughness: 0.38,
+      }),
+    );
+    mesh.position.set(p[0], p[1], p[2]);
+    mesh.userData.hubId = id;
+    feastHubMeshes.push(mesh);
+    feastGroup.add(mesh);
+  }
+
+  const tubePairs = [
+    [0, 1], [0, 2], [0, 3], [0, 4], [1, 2], [2, 3], [3, 4],
+  ];
+  const tubePos = new Float32Array(tubePairs.length * 6);
+  const tubeCol = new Float32Array(tubePairs.length * 6);
+  let ti = 0;
+  for (const [a, b] of tubePairs) {
+    const ha = feastHubPos[a], hb = feastHubPos[b];
+    color.setHex(STACK_COLORS[FEAST_HUB_ORDER[a]]);
+    tubePos[ti] = ha[0]; tubePos[ti + 1] = ha[1]; tubePos[ti + 2] = ha[2];
+    tubeCol[ti] = color.r * 0.4; tubeCol[ti + 1] = color.g * 0.4; tubeCol[ti + 2] = color.b * 0.4; ti += 3;
+    color.setHex(STACK_COLORS[FEAST_HUB_ORDER[b]]);
+    tubePos[ti] = hb[0]; tubePos[ti + 1] = hb[1]; tubePos[ti + 2] = hb[2];
+    tubeCol[ti] = color.r * 0.65; tubeCol[ti + 1] = color.g * 0.65; tubeCol[ti + 2] = color.b * 0.65; ti += 3;
+  }
+  feastTubeGeom = new THREE.BufferGeometry();
+  feastTubeGeom.setAttribute('position', new THREE.BufferAttribute(tubePos, 3));
+  feastTubeGeom.setAttribute('color', new THREE.BufferAttribute(tubeCol, 3));
+  feastTubeLines = new THREE.LineSegments(
+    feastTubeGeom,
+    new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5 }),
+  );
+  feastGroup.add(feastTubeLines);
+
+  const homes = data.base_positions || data.requests.map((_, i) => [0, 0, 0]);
+  feastBodies = homes.map((p, i) => ({
+    x: cx + (p[0] - cx) * 0.85,
+    y: cy + (p[1] - cy) * 0.85,
+    z: cz + (p[2] - cz) * 0.85,
+    vx: 0, vy: 0, vz: 0,
+    hx: cx + (p[0] - cx) * 0.85,
+    hy: cy + (p[1] - cy) * 0.85,
+    hz: cz + (p[2] - cz) * 0.85,
+  }));
+
+  const n = data.requests.length;
+  feastSpringGeom = new THREE.BufferGeometry();
+  feastSpringGeom.setAttribute(
+    'position',
+    new THREE.BufferAttribute(new Float32Array(Math.max(feastSprings.length, 1) * 6), 3).setUsage(THREE.DynamicDrawUsage),
+  );
+  feastSpringGeom.setAttribute(
+    'color',
+    new THREE.BufferAttribute(new Float32Array(Math.max(feastSprings.length, 1) * 6), 3).setUsage(THREE.DynamicDrawUsage),
+  );
+  feastSpringLines = new THREE.LineSegments(
+    feastSpringGeom,
+    new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.62 }),
+  );
+  feastGroup.add(feastSpringLines);
+
+  const geo = new THREE.SphereGeometry(0.013, 8, 8);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x0a0a12, metalness: 0.2, roughness: 0.42 });
+  feastInstanced = new THREE.InstancedMesh(geo, mat, n);
+  feastInstanced.frustumCulled = false;
+  feastInstanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  feastInstanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+  feastGroup.add(feastInstanced);
+
+  feastBaseCamera = { tx: cx, ty: cy, tz: cz, px: cx + span * 0.55, py: cy + span * 0.48, pz: cz + span * 0.92 };
+  controls.target.set(feastBaseCamera.tx, feastBaseCamera.ty, feastBaseCamera.tz);
+  camera.position.set(feastBaseCamera.px, feastBaseCamera.py, feastBaseCamera.pz);
+  lastFeastStep = performance.now();
+}
+
+function stepFeastPhysics(tMs, frame, dt) {
+  if (!feastBodies.length) return;
+  const chaos = feastChaos();
+  const breath = frame?.breath ?? 1;
+  const optimize = feastOptimize;
+  const repulseK = (2.8 + 4.5 * chaos) * (0.75 + 0.35 * breath);
+  const damp = 0.82 + 0.14 * optimize;
+  const springK = 0.04 + 0.14 * (1 - chaos);
+  const homeK = 0.02 + 0.12 * optimize;
+  const hubK = 0.03 + 0.08 * optimize;
+  const hubIdx = Object.fromEntries(FEAST_HUB_ORDER.map((id, i) => [id, i]));
+  const active = [];
+
+  for (let i = 0; i < data.requests.length; i++) {
+    const life = requestLife(data.requests[i], tMs);
+    const b = feastBodies[i];
+    if (life.phase === 'active') active.push(i);
+    else if (life.phase === 'pending') {
+      b.vx *= 0.7; b.vy *= 0.7; b.vz *= 0.7;
+      b.x += (b.hx - b.x) * 0.12;
+      b.y += (b.hy - b.y) * 0.12;
+      b.z += (b.hz - b.z) * 0.12;
+      continue;
+    } else {
+      b.vx *= damp;
+      b.vy *= damp;
+      b.vz *= damp;
+      b.x += (b.hx - b.x) * homeK * 2;
+      b.y += (b.hy - b.y) * homeK * 2;
+      b.z += (b.hz - b.z) * homeK * 2;
+      continue;
+    }
+
+    let fx = (b.hx - b.x) * homeK;
+    let fy = (b.hy - b.y) * homeK;
+    let fz = (b.hz - b.z) * homeK;
+
+    const hw = deriveHardware(data.requests[i]);
+    for (const hid of FEAST_HUB_ORDER) {
+      const hi = hubIdx[hid];
+      const hp = feastHubPos[hi];
+      const w = hw[hid] ?? 0.2;
+      fx += (hp[0] - b.x) * hubK * w;
+      fy += (hp[1] - b.y) * hubK * w;
+      fz += (hp[2] - b.z) * hubK * w;
+    }
+
+    const jitter = chaos * 0.35 * breath * Math.sin(performance.now() * 0.008 + i * 0.7);
+    fx += jitter;
+    fy += Math.sin(performance.now() * 0.006 + i) * jitter * 0.6;
+    fz += Math.cos(performance.now() * 0.005 + i * 1.1) * jitter * 0.5;
+
+    b.vx = (b.vx + fx * dt * 60) * damp;
+    b.vy = (b.vy + fy * dt * 60) * damp;
+    b.vz = (b.vz + fz * dt * 60) * damp;
+    b.x += b.vx * dt * 60;
+    b.y += b.vy * dt * 60;
+    b.z += b.vz * dt * 60;
+  }
+
+  for (let ai = 0; ai < active.length; ai++) {
+    for (let bi = ai + 1; bi < active.length; bi++) {
+      const i = active[ai], j = active[bi];
+      const a = feastBodies[i], c = feastBodies[j];
+      let dx = a.x - c.x, dy = a.y - c.y, dz = a.z - c.z;
+      let d2 = dx * dx + dy * dy + dz * dz + 0.002;
+      const d = Math.sqrt(d2);
+      const f = repulseK / d2;
+      dx = (dx / d) * f; dy = (dy / d) * f; dz = (dz / d) * f;
+      a.vx += dx; a.vy += dy; a.vz += dz;
+      c.vx -= dx; c.vy -= dy; c.vz -= dz;
+    }
+  }
+
+  const activeSet = new Set(active);
+  for (const e of feastSprings) {
+    if (!activeSet.has(e.u) && !activeSet.has(e.v)) continue;
+    const a = feastBodies[e.u], c = feastBodies[e.v];
+    let dx = c.x - a.x, dy = c.y - a.y, dz = c.z - a.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-6;
+    const rest = 0.12 + 0.22 * (1 - chaos);
+    const k = springK * (e.type === 'cache' ? 1.35 : 0.9);
+    const f = k * (dist - rest);
+    dx = (dx / dist) * f; dy = (dy / dist) * f; dz = (dz / dist) * f;
+    if (activeSet.has(e.u)) { a.vx += dx; a.vy += dy; a.vz += dz; }
+    if (activeSet.has(e.v)) { c.vx -= dx; c.vy -= dy; c.vz -= dz; }
+  }
+}
+
+function updateFeastHud(frame, activeCount) {
+  const hud = document.getElementById('feastHud');
+  const chaos = feastChaos();
+  const contention = Math.min(100, Math.round(
+    (activeCount / Math.max(data.requests.length * 0.08, 1)) * 45 * (0.5 + chaos) * (frame?.breath ?? 1),
+  ));
+  document.getElementById('feastContention').textContent = `${contention}%`;
+  document.getElementById('feastTput').textContent = formatTput(dashDisplay.decode_tput || frame?.decode_tput || 0);
+  document.getElementById('feastLat').textContent = formatMs(dashDisplay.latency_p50_ms || 0);
+  document.getElementById('feastAlloc').textContent = feastOptimize >= 0.72 ? 'harmony' : feastOptimize >= 0.4 ? 'balancing' : 'chaos';
+  hud.classList.toggle('chaos', chaos > 0.55);
+  hud.classList.toggle('harmony', feastOptimize >= 0.72);
+}
+
+function updateFeast(frame) {
+  if (!feastInstanced || !feastBodies.length) return 0;
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastFeastStep) / 1000);
+  lastFeastStep = now;
+  const tMs = frame.tMs ?? 0;
+  const chaos = feastChaos();
+  const optimize = feastOptimize;
+  const baseline = data.meta.baseline_latency_ms;
+  const rgb = [0, 0, 0];
+  const breath = frame.breath ?? 1;
+
+  stepFeastPhysics(tMs, frame, dt);
+
+  let activeCount = 0;
+  const pulse = 0.5 + 0.5 * Math.sin(now * 0.0045);
+  const minSize = 0.25, maxSize = 2.6;
+
+  for (let i = 0; i < data.requests.length; i++) {
+    const req = data.requests[i];
+    const life = requestLife(req, tMs);
+    const b = feastBodies[i];
+    let size = minSize + req.size * (maxSize - minSize);
+    let alpha = 1;
+
+    if (life.phase === 'pending') { size *= 0.2; alpha = 0.1; }
+    else if (life.phase === 'done') { size *= 0.65; alpha = 0.38; }
+    else {
+      activeCount++;
+      size *= 1.1 + 0.32 * Math.sin(life.progress * Math.PI) + 0.12 * pulse * (0.5 + chaos);
+      alpha = 0.95;
+    }
+
+    dummy.position.set(b.x, b.y, b.z);
+    dummy.scale.setScalar(size);
+    dummy.updateMatrix();
+    feastInstanced.setMatrixAt(i, dummy.matrix);
+
+    ratioColor(colorInputForMode(req, colorMode, baseline), rgb);
+    feastTint(rgb, optimize);
+    const heat = life.phase === 'active' ? 1 : alpha;
+    feastInstanced.setColorAt(i, color.setRGB(rgb[0] * heat, rgb[1] * heat, rgb[2] * heat));
+  }
+  feastInstanced.instanceMatrix.needsUpdate = true;
+  if (feastInstanced.instanceColor) feastInstanced.instanceColor.needsUpdate = true;
+
+  const layerStress = frame.layer_stress || [1, 1, 1, 1, 1];
+  for (let hi = 0; hi < feastHubMeshes.length; hi++) {
+    const stress = layerStress[hi] ?? 1;
+    const mesh = feastHubMeshes[hi];
+    const hot = (0.85 + 0.45 * Math.min(stress, 2.2)) * (1 + 0.25 * chaos * breath);
+    mesh.scale.setScalar(hot);
+    mesh.material.emissiveIntensity = 0.25 + 0.45 * Math.min(stress, 2) + 0.25 * chaos;
+    mesh.material.opacity = 0.88;
+  }
+
+  if (feastTubeLines) {
+    const flicker = 0.5 + 0.5 * Math.sin(now * 0.009);
+    feastTubeLines.material.opacity = Math.max(0.12, 0.2 + 0.5 * optimize - 0.22 * chaos * flicker);
+  }
+
+  const activeSet = new Set();
+  for (let i = 0; i < data.requests.length; i++) {
+    if (requestLife(data.requests[i], tMs).phase === 'active') activeSet.add(i);
+  }
+  const sp = feastSpringGeom.attributes.position;
+  const sc = feastSpringGeom.attributes.color;
+  let si = 0;
+  for (const e of feastSprings) {
+    if (!activeSet.has(e.u) && !activeSet.has(e.v)) continue;
+    const a = feastBodies[e.u], c = feastBodies[e.v];
+    const on = activeSet.has(e.u) && activeSet.has(e.v);
+    const dim = on ? 0.75 + 0.2 * optimize : 0.28;
+    const col = e.type === 'cache' ? [0.9, 0.55, 0.35] : [0.55, 0.75, 0.95];
+    sp.setXYZ(si, a.x, a.y, a.z); sc.setXYZ(si, col[0] * dim, col[1] * dim, col[2] * dim); si++;
+    sp.setXYZ(si, c.x, c.y, c.z); sc.setXYZ(si, col[0] * dim, col[1] * dim, col[2] * dim); si++;
+  }
+  feastSpringGeom.setDrawRange(0, si);
+  sp.needsUpdate = true;
+  sc.needsUpdate = true;
+
+  if (feastBaseCamera && chaos > 0.35 && activeCount > 8) {
+    feastCameraShake = Math.min(0.12, feastCameraShake + 0.02 * chaos * (activeCount / 40));
+    const s = feastCameraShake * spanFromExtent();
+    camera.position.x = feastBaseCamera.px + (Math.random() - 0.5) * s;
+    camera.position.y = feastBaseCamera.py + (Math.random() - 0.5) * s * 0.7;
+    camera.position.z = feastBaseCamera.pz + (Math.random() - 0.5) * s;
+  } else if (feastBaseCamera) {
+    feastCameraShake *= 0.9;
+    camera.position.x += (feastBaseCamera.px - camera.position.x) * 0.08;
+    camera.position.y += (feastBaseCamera.py - camera.position.y) * 0.08;
+    camera.position.z += (feastBaseCamera.pz - camera.position.z) * 0.08;
+  }
+
+  updateFeastHud(frame, activeCount);
+  return activeCount;
+}
+
+function spanFromExtent() {
+  const ext = data?.meta?.extent;
+  if (!ext) return 1;
+  return Math.max(ext[1] - ext[0], ext[3] - ext[2], ext[5] - ext[4], 0.5) * 0.04;
+}
+
 function buildTopologyScene() {
   clearGroup(topologyGroup);
   hubMeshes.length = 0;
@@ -988,6 +1354,11 @@ function updateHubsPanel() {
       <div class="row"><span class="dot" style="background:#e8814a"></span>Time (X)</div>
       <div class="row"><span class="dot" style="background:#6fa8e8"></span>Prefix lane (Z)</div>
       <div class="row"><span class="dot" style="background:#ffb46e"></span>Peak metric (Y)</div>`;
+    el.style.display = 'block';
+  } else if (activeView === 'feast') {
+    el.innerHTML = FEAST_HUB_ORDER.map(id =>
+      `<div class="row"><span class="dot" style="background:#${STACK_COLORS[id].toString(16).padStart(6, '0')}"></span>${STACK_LABELS[id]}</div>`
+    ).join('');
     el.style.display = 'block';
   } else {
     el.style.display = 'none';
@@ -1322,6 +1693,12 @@ function updateDims() {
       <div><span style="color:#6fa8e8">Z</span> KV prefix family lane</div>
       <div><span style="color:#9fd4a8">Y</span> peak metric per time × lane cell</div>
       <div><span style="color:#ffb46e">Sweep</span> surface grows with playback time</div>`;
+  } else if (activeView === 'feast') {
+    el.innerHTML = `
+      <div><span style="color:#e8814a">Nodes</span> workloads + GPU / memory / storage / bandwidth hubs</div>
+      <div><span style="color:#6fa8e8">Springs</span> KV prefix reuse pulls · contention repels</div>
+      <div><span style="color:#9fd4a8">Allocation</span> slide right for optimized harmony (DDN-style)</div>
+      <div><span style="color:#ffb46e">Replay</span> trace timestamps drive arrival chaos</div>`;
   } else {
     el.innerHTML = `
       <div><span style="color:#e8814a">Flow</span> schedule bends through a warped street manifold</div>
@@ -1348,7 +1725,7 @@ function populateColorModes() {
           ['total_tokens', 'token volume motion'],
           ['output_length', 'output length motion'],
         ]
-      : activeView === 'scatter' || activeView === 'surface'
+      : activeView === 'scatter' || activeView === 'surface' || activeView === 'feast'
         ? [
             ['latency', 'latency'],
             ['ttft_ms', 'TTFT'],
@@ -1397,11 +1774,15 @@ function setView(view) {
   document.getElementById('btnStack').classList.toggle('active', view === 'stack');
   document.getElementById('btnScatter').classList.toggle('active', view === 'scatter');
   document.getElementById('btnSurface').classList.toggle('active', view === 'surface');
+  document.getElementById('btnFeast').classList.toggle('active', view === 'feast');
   fabricGroup.visible = view === 'fabric';
   topologyGroup.visible = view === 'topology';
   stackGroup.visible = view === 'stack';
   scatterGroup.visible = view === 'scatter';
   surfaceGroup.visible = view === 'surface';
+  feastGroup.visible = view === 'feast';
+  document.getElementById('feastHud').classList.toggle('visible', view === 'feast');
+  document.getElementById('optimizeRow').classList.toggle('visible', view === 'feast');
   if (view === 'stack') {
     controls.target.set(0, 1.0, 0);
     camera.position.set(4.2, 2.8, 4.8);
@@ -1421,6 +1802,10 @@ function setView(view) {
     controls.target.set(0, 0.35, 0);
     camera.position.set(2.9, 2.3, 2.9);
     controls.update();
+  } else if (view === 'feast' && feastBaseCamera) {
+    controls.target.set(feastBaseCamera.tx, feastBaseCamera.ty, feastBaseCamera.tz);
+    camera.position.set(feastBaseCamera.px, feastBaseCamera.py, feastBaseCamera.pz);
+    controls.update();
   } else if (data) {
     const ext = data.meta.extent;
     const cx = (ext[0]+ext[1])/2, cy = (ext[2]+ext[3])/2, cz = (ext[4]+ext[5])/2;
@@ -1429,12 +1814,16 @@ function setView(view) {
     camera.position.set(cx + span*0.55, cy + span*0.42, cz + span*0.85);
     controls.update();
   }
-  bloomPass.strength = view === 'stack' ? 0.42
+  bloomPass.strength = view === 'feast'
+    ? 0.32 + 0.28 * feastChaos()
+    : view === 'stack' ? 0.42
     : view === 'topology' ? 0.38
     : view === 'scatter' ? 0.28
     : view === 'surface' ? 0.32
     : 0.22;
-  bloomPass.radius = view === 'stack' ? 0.55
+  bloomPass.radius = view === 'feast'
+    ? 0.48 + 0.12 * feastChaos()
+    : view === 'stack' ? 0.55
     : view === 'topology' ? 0.52
     : view === 'scatter' ? 0.48
     : view === 'surface' ? 0.5
@@ -1457,11 +1846,14 @@ function updateFrame() {
   if (activeView === 'stack' && stackFrame) stackFrame._activeReplay = updateStack(stackFrame);
   if (activeView === 'scatter' && fabricFrame) fabricFrame._activeReplay = updateScatter(fabricFrame);
   if (activeView === 'surface' && fabricFrame) fabricFrame._activeReplay = updateSurface(fabricFrame);
+  if (activeView === 'feast' && fabricFrame && stackFrame) {
+    fabricFrame._activeReplay = updateFeast({ ...fabricFrame, layer_stress: stackFrame.layer_stress });
+  }
   if (dashFrame) updateDashboard(dashFrame);
 
   const frame = activeView === 'fabric' ? fabricFrame
     : activeView === 'stack' ? stackFrame
-    : activeView === 'scatter' || activeView === 'surface' ? fabricFrame
+    : activeView === 'scatter' || activeView === 'surface' || activeView === 'feast' ? fabricFrame
     : topoFrame;
   if (frame) {
     document.getElementById('tlabel').textContent = formatTime(tMs);
@@ -1505,7 +1897,7 @@ function setData(payload) {
   document.getElementById('load').classList.add('hidden');
   document.getElementById('title').textContent = payload.meta.title || 'Trace explorer';
   document.getElementById('subtitle').textContent =
-    `${payload.meta.n_requests.toLocaleString()} requests · ${payload.meta.duration_s.toLocaleString()}s · Fabric · Streets · Stack · Scatter · Surface`;
+    `${payload.meta.n_requests.toLocaleString()} requests · ${payload.meta.duration_s.toLocaleString()}s · Fabric · Streets · Stack · Scatter · Surface · Feast`;
   initDashboard();
   document.getElementById('dashboard').classList.add('visible');
   buildFabricScene();
@@ -1513,6 +1905,7 @@ function setData(payload) {
   buildStackScene();
   buildScatterScene();
   buildSurfaceScene();
+  buildFeastScene();
   setView(activeView);
   tNorm = 0;
 }
@@ -1614,6 +2007,11 @@ function tick(now) {
       updateScatter(sampleFabricWindow(tNorm * data.meta.duration_ms));
     } else if (activeView === 'surface' && surfaceGeom) {
       updateSurface(sampleFabricWindow(tNorm * data.meta.duration_ms));
+    } else if (activeView === 'feast' && feastInstanced) {
+      const tMs = tNorm * data.meta.duration_ms;
+      const ff = sampleFabricWindow(tMs);
+      const sf = sampleHardwareWindow(tMs);
+      if (ff && sf) updateFeast({ ...ff, layer_stress: sf.layer_stress });
     }
   }
   lastFrame = now;
@@ -1627,6 +2025,16 @@ document.getElementById('btnTopology').addEventListener('click', () => setView('
 document.getElementById('btnStack').addEventListener('click', () => setView('stack'));
 document.getElementById('btnScatter').addEventListener('click', () => setView('scatter'));
 document.getElementById('btnSurface').addEventListener('click', () => setView('surface'));
+document.getElementById('btnFeast').addEventListener('click', () => setView('feast'));
+document.getElementById('optimizeLevel').addEventListener('input', e => {
+  feastOptimize = +e.target.value;
+  const lab = document.getElementById('optimizelab');
+  lab.textContent = feastOptimize >= 0.72 ? 'harmony' : feastOptimize >= 0.4 ? 'balance' : 'chaos';
+  if (activeView === 'feast') {
+    bloomPass.strength = 0.32 + 0.28 * feastChaos();
+    updateFrame();
+  }
+});
 document.getElementById('play').addEventListener('click', () => {
   playing = !playing;
   document.getElementById('play').textContent = playing ? '⏸' : '▶';
@@ -1657,6 +2065,7 @@ if (viewParam === 'topology') activeView = 'topology';
 if (viewParam === 'stack') activeView = 'stack';
 if (viewParam === 'scatter') activeView = 'scatter';
 if (viewParam === 'surface') activeView = 'surface';
+if (viewParam === 'feast') activeView = 'feast';
 
 const dataUrl = params.get('data');
 const initialTraceId = resolveInitialTraceId(dataUrl);
