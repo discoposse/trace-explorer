@@ -50,11 +50,15 @@
   #dashboard .val.sub { font-size: 13px; font-weight: 600; color: #b8c5d6; }
   #dashboard .lbl { font-size: 9.5px; color: #6e8096; margin-top: 3px; letter-spacing: .02em; }
   #dashboard .p90 { font-size: 9px; color: #556575; margin-top: 2px; }
-  #legend { position: fixed; right: 16px; bottom: 92px; background: rgba(8,12,19,.88);
-            border: 1px solid #1d2735; border-radius: 10px; padding: 10px 14px; min-width: 180px; z-index: 5; }
-  #legend .bar { width: 180px; height: 8px; border-radius: 4px;
-    background: linear-gradient(90deg, #ff5a3c, #ffb46e, #d8e0ea, #6fa8e8); }
-  #legend .lab { display: flex; justify-content: space-between; font-size: 10.5px; color: #6e8096; margin-top: 4px; }
+  #legend { position: fixed; left: 16px; bottom: 92px; background: rgba(8,12,19,.88);
+            border: 1px solid #1d2735; border-radius: 10px; padding: 10px 14px; min-width: 196px; max-width: 220px;
+            z-index: 5; pointer-events: auto; user-select: none; }
+  #legend .title { font-size: 11px; font-weight: 600; color: #e8eef6; margin-bottom: 8px; letter-spacing: .03em; }
+  #legend .items { display: flex; flex-direction: column; gap: 5px; }
+  #legend .item { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 11px; color: #b8c5d6; }
+  #legend .item.off { opacity: 0.35; }
+  #legend .item input { accent-color: #e8814a; cursor: pointer; margin: 0; }
+  #legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; box-shadow: 0 0 6px rgba(0,0,0,.35); }
   #dims { position: fixed; left: 16px; top: 138px; background: rgba(8,12,19,.78);
           border: 1px solid #1d2735; border-radius: 10px; padding: 8px 12px; font-size: 11px; line-height: 1.55; z-index: 4; }
   #hubs { position: fixed; right: 16px; top: 500px; background: rgba(8,12,19,.78);
@@ -74,6 +78,21 @@
   #optimizeRow { display: none; align-items: center; gap: 8px; }
   #optimizeRow.visible { display: flex; }
   #optimizeLevel { width: 120px; accent-color: #b366ff; }
+  #tooltip { position: fixed; display: none; pointer-events: none; z-index: 25;
+             background: rgba(8,12,19,.94); border: 1px solid #2a3a4f; border-radius: 10px;
+             padding: 10px 12px; max-width: 300px; font-size: 11px; line-height: 1.45;
+             backdrop-filter: blur(8px); box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+  #tooltip.visible { display: block; }
+  #tooltip .tip-hdr { font-weight: 600; color: #e8eef6; margin-bottom: 2px; font-size: 12px; }
+  #tooltip .tip-sub { color: #6e8096; font-size: 10px; margin-bottom: 8px; }
+  #tooltip .tip-rows { display: flex; flex-direction: column; gap: 3px; }
+  #tooltip .tip-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+  #tooltip .tip-row .k { color: #6e8096; display: flex; align-items: center; }
+  #tooltip .tip-row .v { color: #e8eef6; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  #tooltip .tip-row.hi .k, #tooltip .tip-row.hi .v { color: #e8eef6; }
+  #tooltip .tip-row.hi { background: rgba(232,129,74,.12); border-radius: 4px; padding: 1px 4px; margin: 0 -4px; }
+  #tooltip .tip-sw { width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; flex-shrink: 0; }
+  #tooltip .tip-src { font-size: 9px; color: #556575; margin-left: 4px; }
 </style>
 </head>
 <body>
@@ -117,8 +136,6 @@
 <div id="panel">
   <button id="play">▶</button>
   <input id="time" type="range" min="0" max="1" step="any" value="0">
-  <span class="lab">color</span>
-  <select id="colorMode"></select>
   <span class="lab">speed</span>
   <input id="speed" type="range" min="-2" max="1.7" step="0.01" value="-0.3" style="width:100px">
   <span class="lab" id="speedlab">1×</span>
@@ -129,9 +146,10 @@
   </span>
 </div>
 <div id="legend">
-  <div class="bar"></div>
-  <div class="lab"><span id="legendLo">heavy</span><span id="legendHi">light</span></div>
+  <div class="title">Color</div>
+  <div class="items" id="legendItems"></div>
 </div>
+<div id="tooltip"></div>
 
 <script type="importmap">
 { "imports": {
@@ -159,12 +177,73 @@ const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 
+const raycaster = new THREE.Raycaster();
+const pointerNdc = new THREE.Vector2();
+const hoverProject = new THREE.Vector3();
+let pointerClient = { x: 0, y: 0 };
+let hoverPickPending = false;
+let lastHoverKey = '';
+let lastHoverCtx = null;
+
 let data = null;
 let playing = false;
 let tNorm = 0;
 let lastFrame = performance.now();
-let colorMode = 'latency';
 let activeView = 'fabric';
+const UX_METRIC_LAYERS = [
+  { id: 'latency', label: 'Latency', color: 0xff5a3c },
+  { id: 'ttft_ms', label: 'TTFT', color: 0x6fa8e8 },
+  { id: 'itl_ms', label: 'ITL', color: 0xe07a5f },
+  { id: 'input_length', label: 'Input length', color: 0x9fd4a8 },
+  { id: 'output_length', label: 'Output length', color: 0xe8814a },
+  { id: 'total_tokens', label: 'Total tokens', color: 0xb366ff },
+  { id: 'prefix_blocks', label: 'KV prefix blocks', color: 0xc9a227 },
+];
+const VIEW_METRIC_DEFS = {
+  fabric: [
+    { id: 'latency', label: 'Estimated latency', color: 0xff5a3c },
+    { id: 'input_length', label: 'Input length', color: 0x9fd4a8 },
+    { id: 'output_length', label: 'Output length', color: 0xe8814a },
+    { id: 'prefix_blocks', label: 'KV prefix blocks', color: 0xc9a227 },
+  ],
+  topology: [
+    { id: 'latency', label: 'Total latency', color: 0xff5a3c },
+    { id: 'gpu', label: 'GPU pressure', color: 0x76b900 },
+    { id: 'network', label: 'Network pressure', color: 0x6fa8e8 },
+    { id: 'storage', label: 'Storage / KV pressure', color: 0xc9a227 },
+    { id: 'cpu', label: 'CPU scheduler pressure', color: 0x9fb2c8 },
+    { id: 'input_length', label: 'Input length', color: 0x9fd4a8 },
+  ],
+  stack: [
+    { id: 'latency', label: 'Latency motion', color: 0xff5a3c },
+    { id: 'input_length', label: 'Input length motion', color: 0x9fd4a8 },
+    { id: 'total_tokens', label: 'Token volume motion', color: 0xb366ff },
+    { id: 'output_length', label: 'Output length motion', color: 0xe8814a },
+  ],
+  scatter: UX_METRIC_LAYERS,
+  surface: UX_METRIC_LAYERS,
+  feast: UX_METRIC_LAYERS,
+};
+const ALL_METRIC_IDS = [...new Set(Object.values(VIEW_METRIC_DEFS).flat().map(m => m.id))];
+const METRIC_STORAGE_KEY = 'trace-explorer.metrics';
+let metricEnabled = Object.fromEntries(ALL_METRIC_IDS.map(id => [id, true]));
+
+function layersForView(view) {
+  return VIEW_METRIC_DEFS[view] || UX_METRIC_LAYERS;
+}
+
+function currentMetricLayers() {
+  return layersForView(activeView);
+}
+
+function metricDefById(id) {
+  for (const layers of Object.values(VIEW_METRIC_DEFS)) {
+    const match = layers.find(l => l.id === id);
+    if (match) return match;
+  }
+  return null;
+}
+const EDGE_NEUTRAL = [0.34, 0.42, 0.52];
 let nPrefixLanes = 1;
 const dummy = new THREE.Object3D();
 const color = new THREE.Color();
@@ -183,11 +262,11 @@ scene.add(scatterGroup);
 scene.add(surfaceGroup);
 scene.add(feastGroup);
 
-let fabricInstanced = null;
+let fabricMetricMeshes = [];
 let fabricEdgeGeom = null;
 let fabricEdgeLines = null;
 
-let topoInstanced = null;
+let topoMetricMeshes = [];
 let topoEdgeGeom = null;
 let topoEdgeLines = null;
 let topoTargetPos = null;
@@ -205,6 +284,7 @@ const STACK_COLORS = { network: 0x6fa8e8, storage: 0xc9a227, kv_cache: 0xe07a5f,
 const STACK_LABELS = { network: 'Network', storage: 'Storage', kv_cache: 'KV Cache', gpu: 'GPU', hbm: 'HBM' };
 
 let stackLayerMeshes = [];
+let stackMetricMeshes = [];
 let stackPlatformMeshes = [];
 let stackBusLines = null;
 let stackFlowGeom = null;
@@ -212,17 +292,18 @@ let stackFlowLines = null;
 const stackLayerPosCache = Array.from({ length: 5 }, () => new THREE.Vector3());
 
 const SURFACE_TIME_BINS = 48;
-let scatterInstanced = null;
+let scatterMetricMeshes = [];
 let scatterMetricCache = null;
 let surfaceMesh = null;
 let surfaceGeom = null;
 let surfaceHeights = null;
 let surfaceCounts = null;
 let surfaceLaneBins = 16;
-let surfaceHeightMode = 'latency';
+let surfaceHeightMode = 'multi';
+let surfaceDominant = null;
 
 const FEAST_HUB_ORDER = ['gpu', 'network', 'storage', 'kv_cache', 'hbm'];
-let feastInstanced = null;
+let feastMetricMeshes = [];
 let feastHubMeshes = [];
 let feastTubeGeom = null;
 let feastTubeLines = null;
@@ -337,6 +418,517 @@ function colorInputForMode(req, mode, baseline) {
   const ratio = metricRatio(req, mode, baseline);
   if (['gpu','network','storage','cpu'].includes(mode)) return ratio;
   return 2.1 - Math.min(1.8, ratio);
+}
+
+function loadMetricEnabled() {
+  try {
+    const raw = localStorage.getItem(METRIC_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    for (const id of ALL_METRIC_IDS) {
+      if (typeof parsed[id] === 'boolean') metricEnabled[id] = parsed[id];
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function saveMetricEnabled() {
+  try { localStorage.setItem(METRIC_STORAGE_KEY, JSON.stringify(metricEnabled)); } catch (_) { /* ignore */ }
+}
+
+function metricLayerOffset(mi, span = 1, layerCount = currentMetricLayers().length) {
+  const angle = (mi / layerCount) * Math.PI * 2 - Math.PI / 2;
+  const r = 0.038 * span;
+  return [Math.cos(angle) * r, Math.sin(angle) * r * 0.32, Math.sin(angle) * r * 0.68];
+}
+
+function metricNorm(req, mode) {
+  const ratio = metricRatio(req, mode, metricBaseline(mode));
+  return Math.min(1, Math.max(0.1, ratio / 2.2));
+}
+
+function metricColorRgb(mode, out) {
+  const hex = metricDefById(mode)?.color ?? 0xffffff;
+  color.setHex(hex);
+  out[0] = color.r; out[1] = color.g; out[2] = color.b;
+}
+
+function createMetricInstancedLayers(group, n, layers, geoRadius = 0.008) {
+  const meshes = [];
+  for (const layer of layers) {
+    const geo = new THREE.SphereGeometry(geoRadius, 7, 7);
+    const mat = new THREE.MeshStandardMaterial({
+      color: layer.color,
+      emissive: layer.color,
+      emissiveIntensity: 0.58,
+      metalness: 0.18,
+      roughness: 0.4,
+      transparent: true,
+      opacity: 0.94,
+    });
+    const mesh = new THREE.InstancedMesh(geo, mat, n);
+    mesh.frustumCulled = false;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.userData.metricId = layer.id;
+    mesh.visible = metricEnabled[layer.id];
+    group.add(mesh);
+    meshes.push(mesh);
+  }
+  meshes._layers = layers;
+  return meshes;
+}
+
+function syncMetricMeshVisibility(meshes) {
+  const layers = meshes._layers;
+  if (!layers) return;
+  for (let mi = 0; mi < layers.length; mi++) {
+    meshes[mi].visible = metricEnabled[layers[mi].id];
+  }
+}
+
+function paintMetricInstances(meshes, opts) {
+  const {
+    getPos,
+    tMs,
+    minSize,
+    maxSize,
+    useReqSize = true,
+    span = 1,
+    opacityScale = 1,
+  } = opts;
+  const layers = meshes._layers || currentMetricLayers();
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
+  const n = data.requests.length;
+
+  for (let mi = 0; mi < layers.length; mi++) {
+    const mesh = meshes[mi];
+    const layer = layers[mi];
+    const enabled = metricEnabled[layer.id];
+    mesh.visible = enabled;
+    const [ox, oy, oz] = metricLayerOffset(mi, span, layers.length);
+
+    for (let i = 0; i < n; i++) {
+      const req = data.requests[i];
+      const life = requestLife(req, tMs);
+      const norm = metricNorm(req, layer.id);
+      let size = useReqSize
+        ? minSize + req.size * (maxSize - minSize)
+        : minSize + norm * (maxSize - minSize);
+      let sizeMult = 0.38 + 0.62 * norm;
+      let alpha = opacityScale;
+
+      if (life.phase === 'pending') { sizeMult *= 0.22; alpha *= 0.14; }
+      else if (life.phase === 'done') { sizeMult *= 0.68; alpha *= 0.42; }
+      else { sizeMult *= 1.08 + 0.14 * pulse; }
+
+      const [bx, by, bz] = getPos(i);
+      dummy.position.set(bx + ox, by + oy, bz + oz);
+      dummy.scale.setScalar(enabled ? size * sizeMult * alpha : 0.0001);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+function buildMetricLegend() {
+  const root = document.getElementById('legendItems');
+  root.innerHTML = currentMetricLayers().map(layer => {
+    const hex = `#${layer.color.toString(16).padStart(6, '0')}`;
+    const on = metricEnabled[layer.id];
+    return `<label class="item${on ? '' : ' off'}" data-metric="${layer.id}">
+      <input type="checkbox" ${on ? 'checked' : ''} aria-label="${layer.label}">
+      <span class="swatch" style="background:${hex}"></span>
+      <span>${layer.label}</span>
+    </label>`;
+  }).join('');
+
+  root.querySelectorAll('.item').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.tagName === 'INPUT') return;
+      const cb = el.querySelector('input');
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event('change'));
+    });
+    el.querySelector('input').addEventListener('change', e => {
+      const id = el.dataset.metric;
+      metricEnabled[id] = e.target.checked;
+      el.classList.toggle('off', !e.target.checked);
+      saveMetricEnabled();
+      syncAllMetricVisibility();
+      if (surfaceGeom) buildSurfaceHeightsMulti();
+      updateFrame();
+    });
+  });
+}
+
+function syncAllMetricVisibility() {
+  for (const meshes of [fabricMetricMeshes, topoMetricMeshes, scatterMetricMeshes, feastMetricMeshes, stackMetricMeshes]) {
+    if (meshes.length) syncMetricMeshVisibility(meshes);
+  }
+}
+
+function pointerToNdc(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+function getHoverMeshes() {
+  if (!data) return [];
+  const out = [];
+  const vis = m => m.visible;
+  if (activeView === 'fabric') out.push(...fabricMetricMeshes.filter(vis));
+  else if (activeView === 'topology') {
+    out.push(...topoMetricMeshes.filter(vis));
+    out.push(...hubMeshes);
+  } else if (activeView === 'stack') {
+    out.push(...stackMetricMeshes.filter(vis));
+    out.push(...stackLayerMeshes);
+  } else if (activeView === 'scatter') out.push(...scatterMetricMeshes.filter(vis));
+  else if (activeView === 'feast') {
+    out.push(...feastMetricMeshes.filter(vis));
+    out.push(...feastHubMeshes);
+  } else if (activeView === 'surface' && surfaceMesh) out.push(surfaceMesh);
+  return out;
+}
+
+function resolveHover(hit) {
+  const obj = hit.object;
+  if (obj.userData?.hubId) return { kind: 'feast_hub', hubId: obj.userData.hubId };
+  if (obj.userData?.subId) return { kind: 'topology_hub', subId: obj.userData.subId };
+  if (obj === surfaceMesh) {
+    const cell = surfaceCellAtPoint(hit.point);
+    return cell ? { kind: 'surface_cell', ...cell } : null;
+  }
+  if (hit.instanceId == null || hit.instanceId < 0) return null;
+  const req = data.requests[hit.instanceId];
+  if (!req) return null;
+  const layerIdx = stackLayerMeshes.indexOf(obj);
+  return {
+    kind: 'request',
+    req,
+    reqIdx: hit.instanceId,
+    metricId: obj.userData?.metricId || null,
+    stackLayerId: layerIdx >= 0 ? STACK_ORDER[layerIdx] : null,
+  };
+}
+
+function surfaceCellAtPoint(point) {
+  if (!surfaceHeights || !surfaceDominant) return null;
+  const tb = SURFACE_TIME_BINS;
+  const lb = surfaceLaneBins;
+  const ti = Math.min(tb - 1, Math.max(0, Math.floor(((point.x + 1.2) / 2.4) * tb)));
+  const li = Math.min(lb - 1, Math.max(0, Math.floor(((point.z + 1.2) / 2.4) * lb)));
+  const idx = li * tb + ti;
+  const surfaceLayers = layersForView('surface');
+  const dom = surfaceLayers[surfaceDominant[idx]] || surfaceLayers[0];
+  const dur = data.meta.duration_ms;
+  const t0 = (ti / tb) * dur;
+  const t1 = ((ti + 1) / tb) * dur;
+  return {
+    ti, li, idx,
+    height: surfaceHeights[idx],
+    count: surfaceCounts[idx],
+    metricId: dom?.id,
+    metricLabel: dom?.label,
+    metricColor: dom?.color,
+    timeLabel: `${formatTime(t0)} – ${formatTime(t1)}`,
+    laneLabel: `Lane ${li + 1}`,
+  };
+}
+
+function metricSourceTag(req, field) {
+  if (field === 'latency' && req.latency_source === 'measured') return 'measured';
+  if ((field === 'ttft_ms' || field === 'itl_ms') && req.metrics_source === 'measured') return 'measured';
+  if (req.metrics_source === 'measured') return 'measured';
+  return req.latency_source === 'measured' ? 'measured' : 'estimated';
+}
+
+function formatPipelinePct(req, key) {
+  const v = req.pipeline?.[key];
+  return v != null ? `${(v * 100).toFixed(1)}%` : '—';
+}
+
+function tipRow(label, value, color = null, highlight = false, source = '') {
+  const sw = color != null
+    ? `<span class="tip-sw" style="background:#${color.toString(16).padStart(6, '0')}"></span>`
+    : '';
+  const src = source ? `<span class="tip-src">${source}</span>` : '';
+  return `<div class="tip-row${highlight ? ' hi' : ''}"><span class="k">${sw}${label}${src}</span><span class="v">${value}</span></div>`;
+}
+
+function requestPhaseLabel(req, tMs) {
+  const life = requestLife(req, tMs);
+  if (life.phase === 'pending') return 'pending';
+  if (life.phase === 'done') return 'completed';
+  return `active · ${Math.round(life.progress * 100)}%`;
+}
+
+function buildRequestTooltip(ctx, tMs) {
+  const { req, reqIdx, metricId, stackLayerId } = ctx;
+  const layers = currentMetricLayers();
+  const rows = [];
+
+  for (const layer of layers) {
+    if (!metricEnabled[layer.id]) continue;
+    let value = '—';
+    let source = '';
+    if (layer.id === 'latency') {
+      value = formatMs(req.latency_ms);
+      source = metricSourceTag(req, 'latency');
+    } else if (layer.id === 'ttft_ms') {
+      value = formatMs(req.ttft_ms);
+      source = metricSourceTag(req, 'ttft_ms');
+    } else if (layer.id === 'itl_ms') {
+      value = formatItl(req.itl_ms);
+      source = metricSourceTag(req, 'itl_ms');
+    } else if (layer.id === 'input_length') {
+      value = `${formatCount(req.input_length)} tok`;
+    } else if (layer.id === 'output_length') {
+      value = `${formatCount(req.output_length)} tok`;
+    } else if (layer.id === 'total_tokens') {
+      value = `${formatCount(req.total_tokens)} tok`;
+    } else if (layer.id === 'prefix_blocks') {
+      value = formatCount(req.prefix_blocks);
+    } else if (layer.id === 'gpu') {
+      value = formatPipelinePct(req, 'gpu');
+    } else if (layer.id === 'network') {
+      value = formatPipelinePct(req, 'network');
+    } else if (layer.id === 'storage') {
+      value = formatPipelinePct(req, 'storage');
+    } else if (layer.id === 'cpu') {
+      value = formatPipelinePct(req, 'cpu');
+    }
+    rows.push(tipRow(layer.label, value, layer.color, layer.id === metricId, source));
+  }
+
+  const hdr = stackLayerId
+    ? `Request #${req.id ?? reqIdx} · ${STACK_LABELS[stackLayerId]}`
+    : `Request #${req.id ?? reqIdx}`;
+  const bead = metricId ? metricDefById(metricId)?.label : null;
+  const sub = [
+    requestPhaseLabel(req, tMs),
+    `${formatTime(req.start_ms)} → ${formatTime(req.end_ms)}`,
+    bead ? `bead: ${bead}` : null,
+    req.prefix_lane != null ? `prefix lane ${req.prefix_lane}` : null,
+    req.session_lane != null ? `session lane ${req.session_lane}` : null,
+    req.session_id ? `session ${req.session_id}` : null,
+  ].filter(Boolean).join(' · ');
+
+  const extra = [];
+  if (!layers.some(l => l.id === 'input_length') && metricEnabled.input_length) {
+    extra.push(tipRow('Input length', `${formatCount(req.input_length)} tok`, 0x9fd4a8));
+  }
+  if (req.prefill_tput > 0) extra.push(tipRow('Prefill throughput', formatTput(req.prefill_tput)));
+  if (req.decode_tput > 0) extra.push(tipRow('Decode throughput', formatTput(req.decode_tput)));
+
+  return { hdr, sub, rows: [...rows, ...extra] };
+}
+
+function buildHubTooltip(ctx, tMs) {
+  if (ctx.kind === 'topology_hub') {
+    const labels = { network: 'Network ingress', storage: 'Storage / KV cache', cpu: 'CPU scheduler', gpu: 'GPU compute' };
+    const hi = hubMeshes.findIndex(m => m.userData.subId === ctx.subId);
+    const frame = sampleTopologyWindow(tMs, sampleFabricWindow(tMs));
+    const stress = frame?.hub_stress?.[hi];
+    return {
+      hdr: labels[ctx.subId] || ctx.subId,
+      sub: 'Streets subsystem hub',
+      rows: [
+        tipRow('Subsystem', ctx.subId, SUB_COLORS[ctx.subId]),
+        tipRow('Stress', stress != null ? `${stress.toFixed(2)}×` : '—'),
+      ],
+    };
+  }
+  const hi = FEAST_HUB_ORDER.indexOf(ctx.hubId);
+  const frame = sampleHardwareWindow(tMs);
+  const stress = frame?.layer_stress?.[hi];
+  return {
+    hdr: `${STACK_LABELS[ctx.hubId]} hub`,
+    sub: 'Resource Feast infrastructure node',
+    rows: [
+      tipRow('Resource', STACK_LABELS[ctx.hubId], STACK_COLORS[ctx.hubId]),
+      tipRow('Layer stress', stress != null ? `${stress.toFixed(2)}×` : '—'),
+      tipRow('Allocation', feastOptimize >= 0.72 ? 'harmony' : feastOptimize >= 0.4 ? 'balancing' : 'chaos'),
+    ],
+  };
+}
+
+function buildSurfaceTooltip(ctx) {
+  const rows = [
+    tipRow('Time window', ctx.timeLabel),
+    tipRow('Prefix lane', ctx.laneLabel),
+    tipRow('Requests in cell', formatCount(ctx.count)),
+  ];
+  if (ctx.height > 0 && ctx.metricLabel) {
+    rows.push(tipRow(ctx.metricLabel, ctx.height.toFixed(2), ctx.metricColor, true));
+  }
+  return {
+    hdr: 'Surface cell',
+    sub: 'Aggregated peak metric for time × lane',
+    rows,
+  };
+}
+
+function renderTooltip(payload) {
+  const el = document.getElementById('tooltip');
+  if (!payload) {
+    el.classList.remove('visible');
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = `
+    <div class="tip-hdr">${payload.hdr}</div>
+    <div class="tip-sub">${payload.sub}</div>
+    <div class="tip-rows">${payload.rows.join('')}</div>`;
+  el.classList.add('visible');
+  positionTooltip(pointerClient.x, pointerClient.y);
+}
+
+function positionTooltip(clientX, clientY) {
+  const el = document.getElementById('tooltip');
+  const pad = 16;
+  el.style.left = '0';
+  el.style.top = '0';
+  el.classList.add('visible');
+  const rect = el.getBoundingClientRect();
+  let left = clientX + pad;
+  let top = clientY + pad;
+  if (left + rect.width > window.innerWidth - 10) left = clientX - rect.width - pad;
+  if (top + rect.height > window.innerHeight - 10) top = clientY - rect.height - pad;
+  left = Math.max(8, left);
+  top = Math.max(8, top);
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
+function pickHover() {
+  hoverPickPending = false;
+  if (!data) { renderTooltip(null); canvas.style.cursor = ''; return; }
+
+  const targets = getHoverMeshes();
+  if (!targets.length) { renderTooltip(null); canvas.style.cursor = ''; return; }
+
+  raycaster.setFromCamera(pointerNdc, camera);
+  const hits = raycaster.intersectObjects(targets, false);
+  let ctx = hits.length ? resolveHover(hits[0]) : null;
+  if (!ctx) ctx = pickNearestRequestScreen();
+  if (!ctx) {
+    lastHoverKey = '';
+    lastHoverCtx = null;
+    renderTooltip(null);
+    canvas.style.cursor = '';
+    return;
+  }
+
+  const tMs = tNorm * data.meta.duration_ms;
+  let key = '';
+  let payload = null;
+  if (ctx.kind === 'request') {
+    key = `r:${ctx.reqIdx}:${ctx.metricId || ''}:${ctx.stackLayerId || ''}`;
+    payload = buildRequestTooltip(ctx, tMs);
+  } else if (ctx.kind === 'surface_cell') {
+    key = `s:${ctx.idx}`;
+    payload = buildSurfaceTooltip(ctx);
+  } else {
+    key = `h:${ctx.kind}:${ctx.hubId || ctx.subId}`;
+    payload = buildHubTooltip(ctx, tMs);
+  }
+
+  lastHoverCtx = ctx;
+  if (key !== lastHoverKey || ctx.kind === 'request') {
+    lastHoverKey = key;
+    renderTooltip(payload);
+  } else {
+    positionTooltip(pointerClient.x, pointerClient.y);
+  }
+  canvas.style.cursor = 'pointer';
+}
+
+function requestWorldPos(reqIdx) {
+  const tMs = tNorm * data.meta.duration_ms;
+  if (activeView === 'fabric') {
+    const f = sampleFabricWindow(tMs);
+    if (!f?.positions_flat) return null;
+    const pf = f.positions_flat;
+    return [pf[reqIdx * 3], pf[reqIdx * 3 + 1], pf[reqIdx * 3 + 2]];
+  }
+  if (activeView === 'topology' && topoSmoothPos) {
+    const pf = topoSmoothPos;
+    return [pf[reqIdx * 3], pf[reqIdx * 3 + 1], pf[reqIdx * 3 + 2]];
+  }
+  if (activeView === 'scatter' && scatterMetricCache) {
+    const m = scatterMetricCache[reqIdx];
+    const req = data.requests[reqIdx];
+    let yLift = 0;
+    for (const layer of layersForView('scatter')) {
+      if (!metricEnabled[layer.id]) continue;
+      yLift += requestHeightMetric(req, layer.id) * 0.06;
+    }
+    if (!yLift) yLift = requestHeightMetric(req, 'latency') * 0.42;
+    return [m.x + m.y * 0.05 + m.jitter, yLift, m.z + m.jitter * 0.6];
+  }
+  if (activeView === 'stack' && stackLayerMeshes.length) {
+    const frame = sampleHardwareWindow(tMs) || { tMs, breath: 1 };
+    const pos = stackLayerPosition(data.requests[reqIdx], 3, reqIdx, tMs, frame);
+    return [pos.x, pos.y, pos.z];
+  }
+  if (activeView === 'feast' && feastBodies[reqIdx]) {
+    const b = feastBodies[reqIdx];
+    return [b.x, b.y, b.z];
+  }
+  return null;
+}
+
+function pickNearestRequestScreen(maxPx = 18) {
+  if (!data || activeView === 'surface') return null;
+  const rect = canvas.getBoundingClientRect();
+  const mx = pointerClient.x;
+  const my = pointerClient.y;
+  let bestIdx = -1;
+  let bestD = maxPx;
+  for (let i = 0; i < data.requests.length; i++) {
+    const p = requestWorldPos(i);
+    if (!p) continue;
+    hoverProject.set(p[0], p[1], p[2]).project(camera);
+    if (hoverProject.z > 1) continue;
+    const sx = (hoverProject.x * 0.5 + 0.5) * rect.width + rect.left;
+    const sy = (-hoverProject.y * 0.5 + 0.5) * rect.height + rect.top;
+    const d = Math.hypot(sx - mx, sy - my);
+    if (d < bestD) { bestD = d; bestIdx = i; }
+  }
+  if (bestIdx < 0) return null;
+  return {
+    kind: 'request',
+    req: data.requests[bestIdx],
+    reqIdx: bestIdx,
+    metricId: null,
+    stackLayerId: null,
+  };
+}
+
+function scheduleHoverPick() {
+  if (!hoverPickPending) {
+    hoverPickPending = true;
+    requestAnimationFrame(pickHover);
+  }
+}
+
+function hideTooltip() {
+  lastHoverKey = '';
+  lastHoverCtx = null;
+  hoverPickPending = false;
+  renderTooltip(null);
+  canvas.style.cursor = '';
+}
+
+function refreshHoverTooltip() {
+  if (!lastHoverCtx || !data) return;
+  const tMs = tNorm * data.meta.duration_ms;
+  if (lastHoverCtx.kind === 'request') {
+    renderTooltip(buildRequestTooltip(lastHoverCtx, tMs));
+    positionTooltip(pointerClient.x, pointerClient.y);
+  }
 }
 
 function lerp(a,b,t){ return a+(b-a)*t; }
@@ -594,13 +1186,7 @@ function topologyExtent() {
 function buildFabricScene() {
   clearGroup(fabricGroup);
   const n = data.requests.length;
-  const geo = new THREE.SphereGeometry(0.012, 8, 8);
-  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x0a0a12, metalness: 0.15, roughness: 0.5 });
-  fabricInstanced = new THREE.InstancedMesh(geo, mat, n);
-  fabricInstanced.frustumCulled = false;
-  fabricInstanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  fabricInstanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
-  fabricGroup.add(fabricInstanced);
+  fabricMetricMeshes = createMetricInstancedLayers(fabricGroup, n, layersForView('fabric'), 0.009);
 
   const edgeCount = data.edges.length;
   const posArr = new Float32Array(Math.max(edgeCount, 1) * 6);
@@ -640,18 +1226,7 @@ function buildScatterScene() {
   clearGroup(scatterGroup);
   buildScatterMetricCache();
   const n = data.requests.length;
-  const geo = new THREE.SphereGeometry(0.014, 8, 8);
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    emissive: 0x0a0a12,
-    metalness: 0.1,
-    roughness: 0.45,
-  });
-  scatterInstanced = new THREE.InstancedMesh(geo, mat, n);
-  scatterInstanced.frustumCulled = false;
-  scatterInstanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  scatterInstanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
-  scatterGroup.add(scatterInstanced);
+  scatterMetricMeshes = createMetricInstancedLayers(scatterGroup, n, layersForView('scatter'), 0.01);
 
   const grid = new THREE.GridHelper(2.4, 24, 0x2a3a4f, 0x16202e);
   grid.position.y = -1.05;
@@ -670,22 +1245,31 @@ function buildScatterScene() {
   camera.position.set(2.4, 1.9, 2.6);
 }
 
-function buildSurfaceHeights(mode) {
-  surfaceHeightMode = mode;
+function buildSurfaceHeightsMulti() {
+  surfaceHeightMode = 'multi';
   const lanes = [...new Set(data.requests.map(r => r.prefix_lane))].sort((a, b) => a - b);
   const laneIndex = Object.fromEntries(lanes.map((l, i) => [l, i]));
   const tb = SURFACE_TIME_BINS;
   const lb = surfaceLaneBins;
   surfaceHeights = new Float32Array(tb * lb);
   surfaceCounts = new Uint16Array(tb * lb);
+  surfaceDominant = new Uint8Array(tb * lb);
   const dur = data.meta.duration_ms;
 
   for (const req of data.requests) {
     const ti = Math.min(tb - 1, Math.floor((req.start_ms / dur) * tb));
     const li = Math.min(lb - 1, Math.floor(((laneIndex[req.prefix_lane] ?? 0) / Math.max(lanes.length - 1, 1)) * (lb - 1)));
     const idx = li * tb + ti;
-    const h = requestHeightMetric(req, mode);
-    if (h > surfaceHeights[idx]) surfaceHeights[idx] = h;
+    const surfaceLayers = layersForView('surface');
+    for (let mi = 0; mi < surfaceLayers.length; mi++) {
+      const layer = surfaceLayers[mi];
+      if (!metricEnabled[layer.id]) continue;
+      const h = requestHeightMetric(req, layer.id);
+      if (h > surfaceHeights[idx]) {
+        surfaceHeights[idx] = h;
+        surfaceDominant[idx] = mi;
+      }
+    }
     surfaceCounts[idx]++;
   }
 
@@ -714,7 +1298,7 @@ function buildSurfaceScene() {
 
   const lanes = [...new Set(data.requests.map(r => r.prefix_lane))];
   surfaceLaneBins = Math.min(32, Math.max(lanes.length, 8));
-  buildSurfaceHeights('latency');
+  buildSurfaceHeightsMulti();
 
   const tb = SURFACE_TIME_BINS;
   const lb = surfaceLaneBins;
@@ -746,57 +1330,39 @@ function buildSurfaceScene() {
 }
 
 function updateScatter(frame) {
-  if (!scatterInstanced || !scatterMetricCache) return 0;
-  const rgb = [0, 0, 0];
+  if (!scatterMetricMeshes.length || !scatterMetricCache) return 0;
   const tMs = frame.tMs ?? 0;
-  const minSize = 0.18, maxSize = 1.6;
   let activeCount = 0;
-  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
-  const heightMode = colorMode === 'input_length' || colorMode === 'output_length' || colorMode === 'prefix_blocks'
-    ? 'latency'
-    : colorMode;
-
-  for (let i = 0; i < data.requests.length; i++) {
-    const req = data.requests[i];
-    const m = scatterMetricCache[i];
-    const life = requestLife(req, tMs);
-    let size = minSize + m.size * (maxSize - minSize);
-    let alpha = 1;
-    let yLift = requestHeightMetric(req, heightMode) * 0.42;
-
-    if (life.phase === 'pending') {
-      size *= 0.12;
-      alpha = 0.06;
-      yLift *= 0.05;
-    } else if (life.phase === 'done') {
-      size *= 0.82;
-      alpha = 0.55;
-    } else {
-      activeCount++;
-      size *= 1.08 + 0.2 * Math.sin(life.progress * Math.PI) + 0.08 * pulse;
-      alpha = 0.98;
-      yLift *= 1.05 + 0.12 * pulse;
-    }
-
-    dummy.position.set(m.x + m.y * 0.05 + m.jitter, yLift, m.z + m.jitter * 0.6);
-    dummy.scale.setScalar(size);
-    dummy.updateMatrix();
-    scatterInstanced.setMatrixAt(i, dummy.matrix);
-
-    ratioColor(colorInputForMode(req, colorMode, metricBaseline(colorMode)), rgb);
-    scatterInstanced.setColorAt(i, color.setRGB(rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha));
+  for (const req of data.requests) {
+    if (requestLife(req, tMs).phase === 'active') activeCount++;
   }
-  scatterInstanced.instanceMatrix.needsUpdate = true;
-  if (scatterInstanced.instanceColor) scatterInstanced.instanceColor.needsUpdate = true;
+
+  paintMetricInstances(scatterMetricMeshes, {
+    tMs,
+    minSize: 0.16,
+    maxSize: 1.45,
+    span: 0.85,
+    getPos: i => {
+      const m = scatterMetricCache[i];
+      const req = data.requests[i];
+      const life = requestLife(req, tMs);
+      let yLift = 0;
+      for (const layer of layersForView('scatter')) {
+        if (!metricEnabled[layer.id]) continue;
+        yLift += requestHeightMetric(req, layer.id) * 0.06;
+      }
+      if (!yLift) yLift = requestHeightMetric(req, 'latency') * 0.42;
+      if (life.phase === 'pending') yLift *= 0.05;
+      else if (life.phase === 'active') yLift *= 1.05;
+      return [m.x + m.y * 0.05 + m.jitter, yLift, m.z + m.jitter * 0.6];
+    },
+  });
   return activeCount;
 }
 
 function updateSurface(frame) {
   if (!surfaceGeom || !surfaceHeights) return 0;
-  const heightMode = ['ttft_ms', 'itl_ms', 'input_length', 'output_length', 'total_tokens', 'prefix_blocks'].includes(colorMode)
-    ? colorMode
-    : 'latency';
-  if (surfaceHeightMode !== heightMode) buildSurfaceHeights(heightMode);
+  if (surfaceHeightMode !== 'multi') buildSurfaceHeightsMulti();
 
   const pos = surfaceGeom.attributes.position;
   const col = surfaceGeom.attributes.color;
@@ -827,8 +1393,11 @@ function updateSurface(frame) {
       if (revealed && surfaceCounts[idx] > 0) h += 0.02 * Math.min(surfaceCounts[idx], 6);
       const y = h * (revealed ? 1 : 0) + (revealed && h > 0 ? 0.03 * pulse : 0);
       pos.setXYZ(vi, x, y, z);
-      const ratio = h > 0 ? Math.min(2.5, h) : 0.2;
-      ratioColor(ratio, rgb);
+      const surfaceLayers = layersForView('surface');
+      const dom = surfaceDominant?.[idx] ?? 0;
+      const layer = surfaceLayers[dom] || surfaceLayers[0];
+      if (revealed && h > 0 && metricEnabled[layer.id]) metricColorRgb(layer.id, rgb);
+      else { rgb[0] = 0.2; rgb[1] = 0.24; rgb[2] = 0.3; }
       const dim = revealed ? 0.45 + 0.55 * Math.min(h / 0.9, 1) : 0.08;
       col.setXYZ(vi, rgb[0] * dim, rgb[1] * dim, rgb[2] * dim);
     }
@@ -944,13 +1513,7 @@ function buildFeastScene() {
   );
   feastGroup.add(feastSpringLines);
 
-  const geo = new THREE.SphereGeometry(0.013, 8, 8);
-  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x0a0a12, metalness: 0.2, roughness: 0.42 });
-  feastInstanced = new THREE.InstancedMesh(geo, mat, n);
-  feastInstanced.frustumCulled = false;
-  feastInstanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  feastInstanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
-  feastGroup.add(feastInstanced);
+  feastMetricMeshes = createMetricInstancedLayers(feastGroup, n, layersForView('feast'), 0.009);
 
   feastBaseCamera = { tx: cx, ty: cy, tz: cz, px: cx + span * 0.55, py: cy + span * 0.48, pz: cz + span * 0.92 };
   controls.target.set(feastBaseCamera.tx, feastBaseCamera.ty, feastBaseCamera.tz);
@@ -1062,50 +1625,40 @@ function updateFeastHud(frame, activeCount) {
 }
 
 function updateFeast(frame) {
-  if (!feastInstanced || !feastBodies.length) return 0;
+  if (!feastMetricMeshes.length || !feastBodies.length) return 0;
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastFeastStep) / 1000);
   lastFeastStep = now;
   const tMs = frame.tMs ?? 0;
   const chaos = feastChaos();
   const optimize = feastOptimize;
-  const baseline = data.meta.baseline_latency_ms;
-  const rgb = [0, 0, 0];
   const breath = frame.breath ?? 1;
 
   stepFeastPhysics(tMs, frame, dt);
 
   let activeCount = 0;
-  const pulse = 0.5 + 0.5 * Math.sin(now * 0.0045);
-  const minSize = 0.25, maxSize = 2.6;
-
-  for (let i = 0; i < data.requests.length; i++) {
-    const req = data.requests[i];
-    const life = requestLife(req, tMs);
-    const b = feastBodies[i];
-    let size = minSize + req.size * (maxSize - minSize);
-    let alpha = 1;
-
-    if (life.phase === 'pending') { size *= 0.2; alpha = 0.1; }
-    else if (life.phase === 'done') { size *= 0.65; alpha = 0.38; }
-    else {
-      activeCount++;
-      size *= 1.1 + 0.32 * Math.sin(life.progress * Math.PI) + 0.12 * pulse * (0.5 + chaos);
-      alpha = 0.95;
-    }
-
-    dummy.position.set(b.x, b.y, b.z);
-    dummy.scale.setScalar(size);
-    dummy.updateMatrix();
-    feastInstanced.setMatrixAt(i, dummy.matrix);
-
-    ratioColor(colorInputForMode(req, colorMode, baseline), rgb);
-    feastTint(rgb, optimize);
-    const heat = life.phase === 'active' ? 1 : alpha;
-    feastInstanced.setColorAt(i, color.setRGB(rgb[0] * heat, rgb[1] * heat, rgb[2] * heat));
+  for (const req of data.requests) {
+    if (requestLife(req, tMs).phase === 'active') activeCount++;
   }
-  feastInstanced.instanceMatrix.needsUpdate = true;
-  if (feastInstanced.instanceColor) feastInstanced.instanceColor.needsUpdate = true;
+
+  paintMetricInstances(feastMetricMeshes, {
+    tMs,
+    minSize: 0.22,
+    maxSize: 2.4,
+    span: spanFromExtent() * 2.2,
+    getPos: i => {
+      const b = feastBodies[i];
+      return [b.x, b.y, b.z];
+    },
+  });
+  const feastLayers = feastMetricMeshes._layers || layersForView('feast');
+  for (let mi = 0; mi < feastLayers.length; mi++) {
+    const mesh = feastMetricMeshes[mi];
+    if (!metricEnabled[feastLayers[mi].id]) continue;
+    const cool = Math.max(0, (optimize - 0.35) / 0.65);
+    mesh.material.emissiveIntensity = 0.42 + 0.28 * (1 - cool) + 0.18 * chaos;
+    mesh.material.opacity = 0.82 + 0.12 * optimize;
+  }
 
   const layerStress = frame.layer_stress || [1, 1, 1, 1, 1];
   for (let hi = 0; hi < feastHubMeshes.length; hi++) {
@@ -1211,13 +1764,7 @@ function buildTopologyScene() {
   }
 
   const n = data.requests.length;
-  const geo = new THREE.SphereGeometry(0.011, 8, 8);
-  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x08080c, metalness: 0.2, roughness: 0.5 });
-  topoInstanced = new THREE.InstancedMesh(geo, mat, n);
-  topoInstanced.frustumCulled = false;
-  topoInstanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  topoInstanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
-  topologyGroup.add(topoInstanced);
+  topoMetricMeshes = createMetricInstancedLayers(topologyGroup, n, layersForView('topology'), 0.008);
 
   const edgeCount = data.edges.length;
   const posArr = new Float32Array(Math.max(edgeCount, 1) * 6);
@@ -1261,14 +1808,14 @@ function deriveHardware(req) {
   return Object.fromEntries(STACK_ORDER.map(k => [k, raw[k] / Math.max(total, 1e-6)]));
 }
 
-function stackMotionMetric(req, mode) {
-  const baseline = data.meta.baseline_latency_ms || 1;
-  const maxIsl = data.meta.max_isl || Math.max(...data.requests.map(r => r.input_length), 1);
-  const maxTok = data.meta.max_tokens || Math.max(...data.requests.map(r => r.total_tokens), 1);
-  if (mode === 'input_length') return req.input_length / maxIsl;
-  if (mode === 'output_length') return req.output_length / Math.max(...data.requests.map(r => r.output_length), 1);
-  if (mode === 'total_tokens') return req.total_tokens / maxTok;
-  return Math.min(2.5, req.latency_ms / baseline);
+function stackMotionMetric(req) {
+  let sum = 0, cnt = 0;
+  for (const layer of layersForView('stack')) {
+    if (!metricEnabled[layer.id]) continue;
+    sum += metricNorm(req, layer.id);
+    cnt++;
+  }
+  return cnt ? sum / cnt : metricNorm(req, 'latency');
 }
 
 function sampleHardwareWindow(tMs) {
@@ -1306,7 +1853,7 @@ function stackLayerPosition(req, layerIdx, reqIdx, tMs, frame) {
   const maxTok = data.meta.max_tokens || 1;
   const baseline = data.meta.baseline_latency_ms || 1;
   const breath = frame.breath ?? 1;
-  const motion = stackMotionMetric(req, colorMode);
+  const motion = stackMotionMetric(req);
   const life = requestLife(req, tMs);
   const flowPhase = life.phase === 'active' ? life.progress : life.phase === 'done' ? 1 : 0;
 
@@ -1443,6 +1990,8 @@ function buildStackScene() {
   stackFlowLines.frustumCulled = false;
   stackGroup.add(stackFlowLines);
 
+  stackMetricMeshes = createMetricInstancedLayers(stackGroup, n, layersForView('stack'), 0.007);
+
   controls.target.set(0, 1.0, 0);
   camera.position.set(4.2, 2.8, 4.8);
 }
@@ -1482,6 +2031,19 @@ function updateStack(frame) {
   }
 
   for (const mesh of stackLayerMeshes) mesh.instanceMatrix.needsUpdate = true;
+
+  if (stackMetricMeshes.length) {
+    paintMetricInstances(stackMetricMeshes, {
+      tMs,
+      minSize: 0.18,
+      maxSize: 1.35,
+      span: 0.75,
+      getPos: i => {
+        const pos = stackLayerPosition(data.requests[i], 3, i, tMs, frame);
+        return [pos.x, pos.y, pos.z];
+      },
+    });
+  }
 
   const posAttr = stackFlowGeom.attributes.position;
   const colAttr = stackFlowGeom.attributes.color;
@@ -1557,41 +2119,23 @@ function updateStreetLines() {
 }
 
 function paintTopologyNodes(frame) {
-  if (!topoInstanced || !topoSmoothPos) return 0;
-  const baseline = data.meta.baseline_latency_ms;
-  const rgb = [0, 0, 0];
+  if (!topoMetricMeshes.length || !topoSmoothPos) return 0;
   const tMs = frame.tMs ?? 0;
-  const minSize = 0.28, maxSize = 2.4;
-  let activeCount = 0;
   const pf = topoSmoothPos;
-  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
-
-  for (let i = 0; i < data.requests.length; i++) {
-    const req = data.requests[i];
-    const life = requestLife(req, tMs);
-    let size = minSize + req.size * (maxSize - minSize);
-    let alpha = 1;
-    let emissive = 0.08;
-
-    if (life.phase === 'pending') { size *= 0.35; alpha = 0.18; }
-    else if (life.phase === 'done') { size *= 0.72; alpha = 0.42; }
-    else {
-      activeCount++;
-      size *= 1.05 + 0.28 * Math.sin(life.progress * Math.PI) + 0.08 * pulse;
-      alpha = 0.98;
-      emissive = 0.22 + 0.18 * pulse;
-    }
-
-    dummy.position.set(pf[i * 3], pf[i * 3 + 1], pf[i * 3 + 2]);
-    dummy.scale.setScalar(size);
-    dummy.updateMatrix();
-    topoInstanced.setMatrixAt(i, dummy.matrix);
-
-    ratioColor(colorInputForMode(req, colorMode, baseline), rgb);
-    topoInstanced.setColorAt(i, color.setRGB(rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha));
+  let activeCount = 0;
+  for (const req of data.requests) {
+    if (requestLife(req, tMs).phase === 'active') activeCount++;
   }
-  topoInstanced.instanceMatrix.needsUpdate = true;
-  if (topoInstanced.instanceColor) topoInstanced.instanceColor.needsUpdate = true;
+
+  const ext = topologyExtent();
+  const span = Math.max(ext[1] - ext[0], ext[3] - ext[2], ext[5] - ext[4], 0.5);
+  paintMetricInstances(topoMetricMeshes, {
+    tMs,
+    minSize: 0.24,
+    maxSize: 2.1,
+    span: span * 0.04,
+    getPos: i => [pf[i * 3], pf[i * 3 + 1], pf[i * 3 + 2]],
+  });
 
   const posAttr = topoEdgeGeom.attributes.position;
   const colAttr = topoEdgeGeom.attributes.color;
@@ -1600,13 +2144,11 @@ function paintTopologyNodes(frame) {
     const pu = e.u * 3, pv = e.v * 3;
     const reqU = data.requests[e.u], reqV = data.requests[e.v];
     const edgeActive = tMs >= reqU.start_ms && tMs <= reqV.end_ms;
-    ratioColor(Math.min(
-      colorInputForMode(reqU, 'latency', baseline),
-      colorInputForMode(reqV, 'latency', baseline),
-    ), rgb);
-    const dim = (edgeActive ? 0.82 : 0.28) * (e.type === 'cache' ? 0.55 : 0.75);
-    posAttr.setXYZ(vi, pf[pu], pf[pu + 1], pf[pu + 2]); colAttr.setXYZ(vi, rgb[0] * dim, rgb[1] * dim, rgb[2] * dim); vi++;
-    posAttr.setXYZ(vi, pf[pv], pf[pv + 1], pf[pv + 2]); colAttr.setXYZ(vi, rgb[0] * dim, rgb[1] * dim, rgb[2] * dim); vi++;
+    const dim = (edgeActive ? 0.72 : 0.24) * (e.type === 'cache' ? 0.55 : 0.75);
+    posAttr.setXYZ(vi, pf[pu], pf[pu + 1], pf[pu + 2]);
+    colAttr.setXYZ(vi, EDGE_NEUTRAL[0] * dim, EDGE_NEUTRAL[1] * dim, EDGE_NEUTRAL[2] * dim); vi++;
+    posAttr.setXYZ(vi, pf[pv], pf[pv + 1], pf[pv + 2]);
+    colAttr.setXYZ(vi, EDGE_NEUTRAL[0] * dim, EDGE_NEUTRAL[1] * dim, EDGE_NEUTRAL[2] * dim); vi++;
   }
   posAttr.needsUpdate = true;
   colAttr.needsUpdate = true;
@@ -1614,44 +2156,37 @@ function paintTopologyNodes(frame) {
 }
 
 function updateFabric(frame) {
-  if (!fabricInstanced) return;
-  const baseline = data.meta.baseline_latency_ms;
-  const rgb = [0,0,0];
+  if (!fabricMetricMeshes.length) return;
   const pf = frame.positions_flat;
-  const minSize = 0.35, maxSize = 2.8;
+  const tMs = frame.tMs ?? 0;
+  const ext = data.meta.extent;
+  const span = Math.max(ext[1] - ext[0], ext[3] - ext[2], ext[5] - ext[4], 0.5);
 
-  for (let i = 0; i < data.requests.length; i++) {
-    const req = data.requests[i];
-    const size = minSize + req.size * (maxSize - minSize);
-    dummy.position.set(pf[i*3], pf[i*3+1], pf[i*3+2]);
-    dummy.scale.setScalar(size);
-    dummy.updateMatrix();
-    fabricInstanced.setMatrixAt(i, dummy.matrix);
-    ratioColor(colorInputForMode(req, colorMode, baseline), rgb);
-    fabricInstanced.setColorAt(i, color.setRGB(rgb[0], rgb[1], rgb[2]));
-  }
-  fabricInstanced.instanceMatrix.needsUpdate = true;
-  if (fabricInstanced.instanceColor) fabricInstanced.instanceColor.needsUpdate = true;
+  paintMetricInstances(fabricMetricMeshes, {
+    tMs,
+    minSize: 0.3,
+    maxSize: 2.5,
+    span: span * 0.035,
+    getPos: i => [pf[i * 3], pf[i * 3 + 1], pf[i * 3 + 2]],
+  });
 
   const posAttr = fabricEdgeGeom.attributes.position;
   const colAttr = fabricEdgeGeom.attributes.color;
   let vi = 0;
   for (const e of data.edges) {
     const pu = e.u * 3, pv = e.v * 3;
-    ratioColor(Math.min(
-      colorInputForMode(data.requests[e.u], 'latency', baseline),
-      colorInputForMode(data.requests[e.v], 'latency', baseline),
-    ), rgb);
-    const dim = e.type === 'cache' ? 0.45 : 0.7;
-    posAttr.setXYZ(vi, pf[pu], pf[pu+1], pf[pu+2]); colAttr.setXYZ(vi, rgb[0]*dim, rgb[1]*dim, rgb[2]*dim); vi++;
-    posAttr.setXYZ(vi, pf[pv], pf[pv+1], pf[pv+2]); colAttr.setXYZ(vi, rgb[0]*dim, rgb[1]*dim, rgb[2]*dim); vi++;
+    const dim = e.type === 'cache' ? 0.38 : 0.62;
+    posAttr.setXYZ(vi, pf[pu], pf[pu + 1], pf[pu + 2]);
+    colAttr.setXYZ(vi, EDGE_NEUTRAL[0] * dim, EDGE_NEUTRAL[1] * dim, EDGE_NEUTRAL[2] * dim); vi++;
+    posAttr.setXYZ(vi, pf[pv], pf[pv + 1], pf[pv + 2]);
+    colAttr.setXYZ(vi, EDGE_NEUTRAL[0] * dim, EDGE_NEUTRAL[1] * dim, EDGE_NEUTRAL[2] * dim); vi++;
   }
   posAttr.needsUpdate = true;
   colAttr.needsUpdate = true;
 }
 
 function updateTopology(frame) {
-  if (!topoInstanced || !frame || !ensureTopoBuffers(frame)) return;
+  if (!topoMetricMeshes.length || !frame || !ensureTopoBuffers(frame)) return;
   data.topology._lastBreath = frame.breath ?? 1;
   const breathPulse = 0.88 + 0.14 * (frame.breath ?? 1);
 
@@ -1676,97 +2211,39 @@ function updateDims() {
       <div><span style="color:#e8814a">X</span> schedule time</div>
       <div><span style="color:#6fa8e8">Y</span> KV prefix family</div>
       <div><span style="color:#9fd4a8">Z</span> context depth</div>
-      <div><span style="color:#ffb46e">Size</span> input tokens</div>`;
+      <div><span style="color:#ffb46e">Beads</span> 7 metrics orbit each node</div>`;
   } else if (activeView === 'stack') {
     el.innerHTML = `
       <div><span style="color:#e8814a">Layout</span> hardware stack + interconnect buses</div>
       <div><span style="color:#6fa8e8">Spread</span> schedule · input length · token volume</div>
-      <div><span style="color:#9fd4a8">Motion</span> latency-driven flow along the data path</div>
-      <div><span style="color:#ffb46e">Layers</span> all five elements visible per request</div>`;
+      <div><span style="color:#9fd4a8">Motion</span> blended metric flow along the data path</div>
+      <div><span style="color:#ffb46e">Beads</span> 7 metrics at GPU layer per request</div>`;
   } else if (activeView === 'scatter') {
     el.innerHTML = `
       <div><span style="color:#e8814a">X</span> schedule time</div>
-      <div><span style="color:#6fa8e8">Y</span> latency / TTFT / ITL height</div>
+      <div><span style="color:#6fa8e8">Y</span> stacked metric heights</div>
       <div><span style="color:#9fd4a8">Z</span> input context depth (log)</div>
-      <div><span style="color:#ffb46e">Size</span> output tokens · replay reveals points over time</div>`;
+      <div><span style="color:#ffb46e">Beads</span> all 7 metrics orbit each request</div>`;
   } else if (activeView === 'surface') {
     el.innerHTML = `
       <div><span style="color:#e8814a">X</span> schedule time</div>
       <div><span style="color:#6fa8e8">Z</span> KV prefix family lane</div>
-      <div><span style="color:#9fd4a8">Y</span> peak metric per time × lane cell</div>
-      <div><span style="color:#ffb46e">Sweep</span> surface grows with playback time</div>`;
+      <div><span style="color:#9fd4a8">Y</span> peak enabled metric per cell</div>
+      <div><span style="color:#ffb46e">Color</span> dominant metric · toggle in legend</div>`;
   } else if (activeView === 'feast') {
     el.innerHTML = `
       <div><span style="color:#e8814a">Nodes</span> workloads + GPU / memory / storage / bandwidth hubs</div>
       <div><span style="color:#6fa8e8">Springs</span> KV prefix reuse pulls · contention repels</div>
       <div><span style="color:#9fd4a8">Allocation</span> slide right for optimized harmony (DDN-style)</div>
-      <div><span style="color:#ffb46e">Replay</span> trace timestamps drive arrival chaos</div>`;
+      <div><span style="color:#ffb46e">Beads</span> all 7 metrics orbit each workload</div>`;
   } else {
     el.innerHTML = `
       <div><span style="color:#e8814a">Flow</span> schedule bends through a warped street manifold</div>
       <div><span style="color:#6fa8e8">Lanes</span> Network · Storage · CPU · GPU avenues</div>
       <div><span style="color:#9fd4a8">Motion</span> elastic stretch + breath under active load</div>
-      <div><span style="color:#ffb46e">Glow</span> in-flight requests pulse along the streets</div>`;
+      <div><span style="color:#ffb46e">Beads</span> all 7 metrics orbit each request</div>`;
   }
   updateHubsPanel();
-}
-
-function populateColorModes() {
-  const sel = document.getElementById('colorMode');
-  const modes = activeView === 'fabric'
-    ? [
-        ['latency', 'estimated latency'],
-        ['input_length', 'input length'],
-        ['output_length', 'output length'],
-        ['prefix_blocks', 'KV prefix blocks'],
-      ]
-    : activeView === 'stack'
-      ? [
-          ['latency', 'latency motion'],
-          ['input_length', 'input length motion'],
-          ['total_tokens', 'token volume motion'],
-          ['output_length', 'output length motion'],
-        ]
-      : activeView === 'scatter' || activeView === 'surface' || activeView === 'feast'
-        ? [
-            ['latency', 'latency'],
-            ['ttft_ms', 'TTFT'],
-            ['itl_ms', 'ITL'],
-            ['input_length', 'input length'],
-            ['output_length', 'output length'],
-            ['total_tokens', 'total tokens'],
-            ['prefix_blocks', 'KV prefix blocks'],
-          ]
-        : [
-            ['latency', 'total latency'],
-            ['gpu', 'GPU pressure'],
-            ['network', 'network pressure'],
-            ['storage', 'storage / KV pressure'],
-            ['cpu', 'CPU scheduler pressure'],
-            ['input_length', 'input length'],
-          ];
-  sel.innerHTML = modes.map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
-  colorMode = modes[0][0];
-  updateLegend();
-}
-
-function updateLegend() {
-  const labels = {
-    latency: ['slow / heavy', 'fast / light'],
-    input_length: ['small input', 'large input'],
-    output_length: ['small output', 'large output'],
-    prefix_blocks: ['short prefix', 'long prefix'],
-    gpu: ['low GPU', 'high GPU'],
-    network: ['low network', 'high network'],
-    storage: ['low KV', 'high KV'],
-    cpu: ['low CPU', 'high CPU'],
-    total_tokens: ['few tokens', 'many tokens'],
-    ttft_ms: ['slow TTFT', 'fast TTFT'],
-    itl_ms: ['slow ITL', 'fast ITL'],
-  };
-  const [lo, hi] = labels[colorMode] || labels.latency;
-  document.getElementById('legendLo').textContent = lo;
-  document.getElementById('legendHi').textContent = hi;
 }
 
 function setView(view) {
@@ -1830,7 +2307,9 @@ function setView(view) {
     : view === 'scatter' ? 0.48
     : view === 'surface' ? 0.5
     : 0.45;
-  populateColorModes();
+  syncAllMetricVisibility();
+  buildMetricLegend();
+  hideTooltip();
   updateDims();
   updateFrame();
 }
@@ -2012,17 +2491,18 @@ function tick(now) {
       stepTopologyFluid(0.1);
       updateStreetLines();
       paintTopologyNodes({ tMs: tNorm * data.meta.duration_ms, breath: data.topology?._lastBreath ?? 1 });
-    } else if (activeView === 'scatter' && scatterInstanced) {
+    } else if (activeView === 'scatter' && scatterMetricMeshes.length) {
       updateScatter(sampleFabricWindow(tNorm * data.meta.duration_ms));
     } else if (activeView === 'surface' && surfaceGeom) {
       updateSurface(sampleFabricWindow(tNorm * data.meta.duration_ms));
-    } else if (activeView === 'feast' && feastInstanced) {
+    } else if (activeView === 'feast' && feastMetricMeshes.length) {
       const tMs = tNorm * data.meta.duration_ms;
       const ff = sampleFabricWindow(tMs);
       const sf = sampleHardwareWindow(tMs);
       if (ff && sf) updateFeast({ ...ff, layer_stress: sf.layer_stress });
     }
   }
+  if (lastHoverCtx?.kind === 'request') refreshHoverTooltip();
   lastFrame = now;
   controls.update();
   composer.render();
@@ -2052,20 +2532,30 @@ document.getElementById('time').addEventListener('input', e => { tNorm = +e.targ
 document.getElementById('speed').addEventListener('input', e => {
   document.getElementById('speedlab').textContent = `${Math.pow(10,+e.target.value).toFixed(2)}×`;
 });
-document.getElementById('colorMode').addEventListener('change', e => { colorMode = e.target.value; updateLegend(); updateFrame(); });
 document.getElementById('tracePick').addEventListener('change', e => { loadTrace(e.target.value); });
 document.getElementById('file').addEventListener('change', async e => {
   const file = e.target.files?.[0];
   if (!file) return;
   currentTraceId = null;
   try { localStorage.removeItem(TRACE_STORAGE_KEY); } catch (_) { /* ignore */ }
+  hideTooltip();
   setData(JSON.parse(await file.text()));
 });
+
+canvas.addEventListener('pointermove', e => {
+  pointerClient.x = e.clientX;
+  pointerClient.y = e.clientY;
+  pointerToNdc(e.clientX, e.clientY);
+  scheduleHoverPick();
+});
+canvas.addEventListener('pointerleave', hideTooltip);
 
 window.addEventListener('resize', resize);
 resize();
 requestAnimationFrame(tick);
 
+loadMetricEnabled();
+buildMetricLegend();
 populateTracePicker();
 
 const params = new URLSearchParams(location.search);
