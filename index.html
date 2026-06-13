@@ -289,6 +289,12 @@ let stackPlatformMeshes = [];
 let stackBusLines = null;
 let stackFlowGeom = null;
 let stackFlowLines = null;
+let stackPosFlat = null;
+let stackLastActiveCount = 0;
+let lastStackUpdate = 0;
+const STACK_GPU_LAYER_IDX = 3;
+const STACK_HEAVY_N = 1500;
+const STACK_MIN_INTERVAL_MS = 32;
 const stackLayerPosCache = Array.from({ length: 5 }, () => new THREE.Vector3());
 
 const SURFACE_TIME_BINS = 48;
@@ -452,10 +458,10 @@ function metricColorRgb(mode, out) {
   out[0] = color.r; out[1] = color.g; out[2] = color.b;
 }
 
-function createMetricInstancedLayers(group, n, layers, geoRadius = 0.008) {
+function createMetricInstancedLayers(group, n, layers, geoRadius = 0.008, geoSegments = [7, 7]) {
   const meshes = [];
   for (const layer of layers) {
-    const geo = new THREE.SphereGeometry(geoRadius, 7, 7);
+    const geo = new THREE.SphereGeometry(geoRadius, geoSegments[0], geoSegments[1]);
     const mat = new THREE.MeshStandardMaterial({
       color: layer.color,
       emissive: layer.color,
@@ -477,6 +483,19 @@ function createMetricInstancedLayers(group, n, layers, geoRadius = 0.008) {
   return meshes;
 }
 
+function ensureStackPosBuffer(n) {
+  const need = n * STACK_ORDER.length * 3;
+  if (!stackPosFlat || stackPosFlat.length < need) stackPosFlat = new Float32Array(need);
+}
+
+function writeInstanceMatrix(array, idx, x, y, z, s) {
+  const o = idx * 16;
+  array[o] = s; array[o + 1] = 0; array[o + 2] = 0; array[o + 3] = 0;
+  array[o + 4] = 0; array[o + 5] = s; array[o + 6] = 0; array[o + 7] = 0;
+  array[o + 8] = 0; array[o + 9] = 0; array[o + 10] = s; array[o + 11] = 0;
+  array[o + 12] = x; array[o + 13] = y; array[o + 14] = z; array[o + 15] = 1;
+}
+
 function syncMetricMeshVisibility(meshes) {
   const layers = meshes._layers;
   if (!layers) return;
@@ -488,6 +507,9 @@ function syncMetricMeshVisibility(meshes) {
 function paintMetricInstances(meshes, opts) {
   const {
     getPos,
+    posFlat,
+    posStride = STACK_ORDER.length * 3,
+    posLayerIdx = 0,
     tMs,
     minSize,
     maxSize,
@@ -499,6 +521,7 @@ function paintMetricInstances(meshes, opts) {
   const layers = meshes._layers || currentMetricLayers();
   const pulse = animatePulse ? 0.5 + 0.5 * Math.sin(performance.now() * 0.004) : 1;
   const n = data.requests.length;
+  const posLayerBase = posLayerIdx * 3;
 
   for (let mi = 0; mi < layers.length; mi++) {
     const mesh = meshes[mi];
@@ -506,6 +529,7 @@ function paintMetricInstances(meshes, opts) {
     const enabled = metricEnabled[layer.id];
     mesh.visible = enabled;
     const [ox, oy, oz] = metricLayerOffset(mi, span, layers.length);
+    const mats = mesh.instanceMatrix.array;
 
     for (let i = 0; i < n; i++) {
       const req = data.requests[i];
@@ -521,11 +545,14 @@ function paintMetricInstances(meshes, opts) {
       else if (life.phase === 'done') { sizeMult *= 0.68; alpha *= 0.42; }
       else { sizeMult *= 1.08 + 0.14 * pulse; }
 
-      const [bx, by, bz] = getPos(i);
-      dummy.position.set(bx + ox, by + oy, bz + oz);
-      dummy.scale.setScalar(enabled ? size * sizeMult * alpha : 0.0001);
-      dummy.updateMatrix();
-      mesh.setMatrixAt(i, dummy.matrix);
+      let bx, by, bz;
+      if (posFlat) {
+        const bi = i * posStride + posLayerBase;
+        bx = posFlat[bi]; by = posFlat[bi + 1]; bz = posFlat[bi + 2];
+      } else {
+        [bx, by, bz] = getPos(i);
+      }
+      writeInstanceMatrix(mats, i, bx + ox, by + oy, bz + oz, enabled ? size * sizeMult * alpha : 0.0001);
     }
     mesh.instanceMatrix.needsUpdate = true;
   }
@@ -1875,6 +1902,10 @@ function stackLayerCenters() {
 }
 
 function stackLayerPosition(req, layerIdx, reqIdx, tMs, frame) {
+  if (stackPosFlat && reqIdx >= 0 && reqIdx < data.requests.length) {
+    const bi = reqIdx * STACK_ORDER.length * 3 + layerIdx * 3;
+    return stackLayerPosCache[layerIdx].set(stackPosFlat[bi], stackPosFlat[bi + 1], stackPosFlat[bi + 2]);
+  }
   const centers = stackLayerCenters();
   const layerId = STACK_ORDER[layerIdx];
   const center = centers[layerIdx];
@@ -1972,7 +2003,7 @@ function buildStackScene() {
     stackPlatformMeshes.push(platform);
     stackGroup.add(platform);
 
-    const geo = new THREE.SphereGeometry(0.009, 7, 7);
+    const geo = new THREE.SphereGeometry(0.009, 5, 4);
     const mat = new THREE.MeshStandardMaterial({
       color: STACK_COLORS[layerId],
       emissive: STACK_COLORS[layerId],
@@ -2020,19 +2051,36 @@ function buildStackScene() {
   stackFlowLines.frustumCulled = false;
   stackGroup.add(stackFlowLines);
 
-  stackMetricMeshes = createMetricInstancedLayers(stackGroup, n, layersForView('stack'), 0.007);
+  stackMetricMeshes = createMetricInstancedLayers(stackGroup, n, layersForView('stack'), 0.007, [5, 4]);
+  ensureStackPosBuffer(n);
+  lastStackUpdate = 0;
 
   controls.target.set(0, 1.0, 0);
   camera.position.set(4.2, 2.8, 4.8);
 }
 
 function updateStack(frame) {
-  if (!stackLayerMeshes.length || !frame) return 0;
+  if (!stackLayerMeshes.length || !frame) return stackLastActiveCount;
+  const n = data.requests.length;
+  const now = performance.now();
+  if (n > STACK_HEAVY_N && playing && now - lastStackUpdate < STACK_MIN_INTERVAL_MS) {
+    return stackLastActiveCount;
+  }
+  lastStackUpdate = now;
+
   const tMs = frame.tMs ?? 0;
   const breathPulse = 0.86 + 0.16 * (frame.breath ?? 1);
   const minSize = 0.22, maxSize = 1.85;
   let activeCount = 0;
-  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.0045);
+  const pulse = playing ? 0.5 + 0.5 * Math.sin(now * 0.0045) : 1;
+  const centers = stackLayerCenters();
+  const maxIsl = data.meta.max_isl || 1;
+  const maxTok = data.meta.max_tokens || 1;
+  const baseline = data.meta.baseline_latency_ms || 1;
+  const breath = frame.breath ?? 1;
+  const spread = 0.52 * breath;
+  const dur = data.meta.duration_ms;
+  ensureStackPosBuffer(n);
 
   for (let li = 0; li < stackPlatformMeshes.length; li++) {
     const stress = frame.layer_stress?.[li] ?? 1;
@@ -2042,21 +2090,52 @@ function updateStack(frame) {
     mesh.material.opacity = 0.28 + 0.14 * breathPulse;
   }
 
-  for (let i = 0; i < data.requests.length; i++) {
+  for (let i = 0; i < n; i++) {
     const req = data.requests[i];
     const life = requestLife(req, tMs);
+    const hw = req.hardware || deriveHardware(req);
+    const motion = stackMotionMetric(req);
+    const flowPhase = life.phase === 'active' ? life.progress : life.phase === 'done' ? 1 : 0;
     let size = minSize + req.size * (maxSize - minSize);
 
     if (life.phase === 'pending') { size *= 0.45; }
     else if (life.phase === 'done') { size *= 0.72; }
     else { activeCount++; size *= 1.1 + 0.25 * Math.sin(life.progress * Math.PI) + 0.1 * pulse; }
 
+    const sched = (req.start_ms / dur) * 2 - 1;
+    const islNorm = req.input_length / maxIsl;
+    const tokNorm = req.total_tokens / maxTok;
+    const latNorm = Math.min(2.5, req.latency_ms / baseline);
+    const posBase = i * STACK_ORDER.length * 3;
+
     for (let li = 0; li < STACK_ORDER.length; li++) {
-      const pos = stackLayerPosition(req, li, i, tMs, frame);
-      dummy.position.copy(pos);
-      dummy.scale.setScalar(size * (0.85 + 0.3 * deriveHardware(req)[STACK_ORDER[li]]));
-      dummy.updateMatrix();
-      stackLayerMeshes[li].setMatrixAt(i, dummy.matrix);
+      const center = centers[li];
+      const layerId = STACK_ORDER[li];
+      const hwW = hw[layerId] ?? 0.2;
+      let px = center[0] + sched * spread + 0.07 * Math.sin(i * 1.37 + li * 0.8);
+      let py = center[1] + (latNorm - 0.8) * 0.18 * motion + 0.05 * Math.sin(i * 0.9 + li + tMs * 0.0004);
+      let pz = center[2] + islNorm * spread + tokNorm * 0.22 + 0.06 * Math.cos(i * 1.2);
+
+      if (li < STACK_ORDER.length - 1) {
+        const next = centers[li + 1];
+        tmpVec.set(next[0] - center[0], next[1] - center[1], next[2] - center[2]).normalize();
+        px += tmpVec.x * flowPhase * hwW * motion * 0.42;
+        py += tmpVec.y * flowPhase * hwW * motion * 0.42;
+        pz += tmpVec.z * flowPhase * hwW * motion * 0.42;
+      }
+
+      const pi = posBase + li * 3;
+      stackPosFlat[pi] = px;
+      stackPosFlat[pi + 1] = py;
+      stackPosFlat[pi + 2] = pz;
+      writeInstanceMatrix(
+        stackLayerMeshes[li].instanceMatrix.array,
+        i,
+        px,
+        py,
+        pz,
+        size * (0.85 + 0.3 * hwW),
+      );
     }
   }
 
@@ -2068,32 +2147,38 @@ function updateStack(frame) {
       minSize: 0.18,
       maxSize: 1.35,
       span: 0.75,
-      getPos: i => {
-        const pos = stackLayerPosition(data.requests[i], 3, i, tMs, frame);
-        return [pos.x, pos.y, pos.z];
-      },
+      posFlat: stackPosFlat,
+      posLayerIdx: STACK_GPU_LAYER_IDX,
+      animatePulse: playing,
     });
   }
 
   const posAttr = stackFlowGeom.attributes.position;
   const colAttr = stackFlowGeom.attributes.color;
   let vi = 0;
-  for (let i = 0; i < data.requests.length; i++) {
+  for (let i = 0; i < n; i++) {
     const req = data.requests[i];
     const life = requestLife(req, tMs);
-    const alpha = life.phase === 'pending' ? 0.08 : life.phase === 'done' ? 0.22 : 0.72;
+    if (life.phase === 'pending') continue;
+    const hw = req.hardware || deriveHardware(req);
+    const alpha = life.phase === 'done' ? 0.22 : 0.72;
+    const posBase = i * STACK_ORDER.length * 3;
     for (let li = 0; li < STACK_ORDER.length - 1; li++) {
-      const a = stackLayerPosition(req, li, i, tMs, frame);
-      const ax = a.x, ay = a.y, az = a.z;
-      const b = stackLayerPosition(req, li + 1, i, tMs, frame);
-      color.setHex(STACK_COLORS[STACK_ORDER[li + 1]]);
-      const dim = alpha * (0.45 + 0.55 * deriveHardware(req)[STACK_ORDER[li + 1]]);
-      posAttr.setXYZ(vi, ax, ay, az); colAttr.setXYZ(vi, color.r * dim, color.g * dim, color.b * dim); vi++;
-      posAttr.setXYZ(vi, b.x, b.y, b.z); colAttr.setXYZ(vi, color.r * dim, color.g * dim, color.b * dim); vi++;
+      const a = posBase + li * 3;
+      const b = a + 3;
+      const layerId = STACK_ORDER[li + 1];
+      color.setHex(STACK_COLORS[layerId]);
+      const dim = alpha * (0.45 + 0.55 * (hw[layerId] ?? 0.2));
+      posAttr.setXYZ(vi, stackPosFlat[a], stackPosFlat[a + 1], stackPosFlat[a + 2]);
+      colAttr.setXYZ(vi, color.r * dim, color.g * dim, color.b * dim); vi++;
+      posAttr.setXYZ(vi, stackPosFlat[b], stackPosFlat[b + 1], stackPosFlat[b + 2]);
+      colAttr.setXYZ(vi, color.r * dim, color.g * dim, color.b * dim); vi++;
     }
   }
+  stackFlowGeom.setDrawRange(0, vi);
   posAttr.needsUpdate = true;
   colAttr.needsUpdate = true;
+  stackLastActiveCount = activeCount;
   return activeCount;
 }
 
@@ -2514,10 +2599,7 @@ function tick(now) {
     if (dashFrame) updateDashboard(dashFrame);
   }
   if (!playing && data) {
-    if (activeView === 'stack' && stackLayerMeshes.length) {
-      const frame = sampleHardwareWindow(tNorm * data.meta.duration_ms);
-      if (frame) updateStack(frame);
-    } else if (activeView === 'topology' && topoTargetPos) {
+    if (activeView === 'topology' && topoTargetPos) {
       stepTopologyFluid(0.1);
       updateStreetLines();
       paintTopologyNodes({ tMs: tNorm * data.meta.duration_ms, breath: data.topology?._lastBreath ?? 1 });
