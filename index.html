@@ -1627,14 +1627,18 @@ function updateFeastHud(frame, activeCount) {
 function updateFeast(frame) {
   if (!feastMetricMeshes.length || !feastBodies.length) return 0;
   const now = performance.now();
-  const dt = Math.min(0.05, (now - lastFeastStep) / 1000);
-  lastFeastStep = now;
   const tMs = frame.tMs ?? 0;
   const chaos = feastChaos();
   const optimize = feastOptimize;
   const breath = frame.breath ?? 1;
 
-  stepFeastPhysics(tMs, frame, dt);
+  if (playing) {
+    const dt = Math.min(0.05, (now - lastFeastStep) / 1000);
+    lastFeastStep = now;
+    stepFeastPhysics(tMs, frame, dt);
+  } else {
+    lastFeastStep = now;
+  }
 
   let activeCount = 0;
   for (const req of data.requests) {
@@ -1671,7 +1675,7 @@ function updateFeast(frame) {
   }
 
   if (feastTubeLines) {
-    const flicker = 0.5 + 0.5 * Math.sin(now * 0.009);
+    const flicker = playing ? 0.5 + 0.5 * Math.sin(now * 0.009) : 1;
     feastTubeLines.material.opacity = Math.max(0.12, 0.2 + 0.5 * optimize - 0.22 * chaos * flicker);
   }
 
@@ -1695,17 +1699,15 @@ function updateFeast(frame) {
   sp.needsUpdate = true;
   sc.needsUpdate = true;
 
-  if (feastBaseCamera && chaos > 0.35 && activeCount > 8) {
+  if (playing && feastBaseCamera && chaos > 0.35 && activeCount > 8) {
     feastCameraShake = Math.min(0.12, feastCameraShake + 0.02 * chaos * (activeCount / 40));
     const s = feastCameraShake * spanFromExtent();
     camera.position.x = feastBaseCamera.px + (Math.random() - 0.5) * s;
     camera.position.y = feastBaseCamera.py + (Math.random() - 0.5) * s * 0.7;
     camera.position.z = feastBaseCamera.pz + (Math.random() - 0.5) * s;
   } else if (feastBaseCamera) {
-    feastCameraShake *= 0.9;
-    camera.position.x += (feastBaseCamera.px - camera.position.x) * 0.08;
-    camera.position.y += (feastBaseCamera.py - camera.position.y) * 0.08;
-    camera.position.z += (feastBaseCamera.pz - camera.position.z) * 0.08;
+    feastCameraShake = 0;
+    camera.position.set(feastBaseCamera.px, feastBaseCamera.py, feastBaseCamera.pz);
   }
 
   updateFeastHud(frame, activeCount);
@@ -2495,11 +2497,6 @@ function tick(now) {
       updateScatter(sampleFabricWindow(tNorm * data.meta.duration_ms));
     } else if (activeView === 'surface' && surfaceGeom) {
       updateSurface(sampleFabricWindow(tNorm * data.meta.duration_ms));
-    } else if (activeView === 'feast' && feastMetricMeshes.length) {
-      const tMs = tNorm * data.meta.duration_ms;
-      const ff = sampleFabricWindow(tMs);
-      const sf = sampleHardwareWindow(tMs);
-      if (ff && sf) updateFeast({ ...ff, layer_stress: sf.layer_stress });
     }
   }
   if (lastHoverCtx?.kind === 'request') refreshHoverTooltip();
