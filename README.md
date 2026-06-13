@@ -9,26 +9,22 @@ Interactive replay of inference traces with synchronized views:
 - **Surface** — time × prefix-lane heat surface
 - **UX dashboard** — TTFT, ITL, latency, throughput during playback
 
-The first supported trace format is Mooncake JSONL; more formats will follow.
+Supported trace formats: Mooncake JSONL and [RAGPulse](https://github.com/flashserve/RAGPulse) RAG workload traces.
 
 ## Live demo
 
 https://discoposse.github.io/trace-explorer/
 
+Use the **Trace** dropdown in the viewer — your selection persists across visits.
+
 ### Traces (2,000-request previews)
 
-| Trace | Link |
-|-------|------|
-| Toolagent | [Open](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=mooncake_preview.json) |
-| Conversation | [Open](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=conversation_preview.json) |
-| Synthetic | [Open](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=synthetic_preview.json) |
-
-Example views (conversation trace):
-
-- [Streets](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=conversation_preview.json&view=topology)
-- [Stack](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=conversation_preview.json&view=stack)
-- [Scatter](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=conversation_preview.json&view=scatter)
-- [Surface](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=conversation_preview.json&view=surface)
+| Trace | Source | Link |
+|-------|--------|------|
+| Toolagent | Mooncake | [Open](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=mooncake_preview.json) |
+| Conversation | Mooncake | [Open](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=conversation_preview.json) |
+| Synthetic | Mooncake | [Open](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=synthetic_preview.json) |
+| RAGPulse | [flashserve/RAGPulse](https://github.com/flashserve/RAGPulse) | [Open](https://discoposse.github.io/trace-explorer/mooncake3d.html?data=ragpulse_preview.json) |
 
 ## Update the demo
 
@@ -41,11 +37,6 @@ cd /path/to/trace-explorer
 git add -A && git commit -m "Update trace previews" && git push
 ```
 
-Single trace:
-
-```bash
-./examples/trace-replay-elastic-viewer/publish-pages.sh /path/to/trace.jsonl output_preview.json
-WRITE_INDEX=1 ./examples/trace-replay-elastic-viewer/publish-pages.sh ...  # also refresh index.html
-```
+Set `RAGPULSE_ROOT` if the RAGPulse clone is not at `~/Documents/RAGPulse`.
 
 Export source: `export_mooncake_trace_layout.py` in aiperf-toolkit.
