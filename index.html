@@ -494,9 +494,10 @@ function paintMetricInstances(meshes, opts) {
     useReqSize = true,
     span = 1,
     opacityScale = 1,
+    animatePulse = true,
   } = opts;
   const layers = meshes._layers || currentMetricLayers();
-  const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
+  const pulse = animatePulse ? 0.5 + 0.5 * Math.sin(performance.now() * 0.004) : 1;
   const n = data.requests.length;
 
   for (let mi = 0; mi < layers.length; mi++) {
@@ -1514,11 +1515,32 @@ function buildFeastScene() {
   feastGroup.add(feastSpringLines);
 
   feastMetricMeshes = createMetricInstancedLayers(feastGroup, n, layersForView('feast'), 0.009);
+  feastGroup.position.set(0, 0, 0);
 
   feastBaseCamera = { tx: cx, ty: cy, tz: cz, px: cx + span * 0.55, py: cy + span * 0.48, pz: cz + span * 0.92 };
   controls.target.set(feastBaseCamera.tx, feastBaseCamera.ty, feastBaseCamera.tz);
   camera.position.set(feastBaseCamera.px, feastBaseCamera.py, feastBaseCamera.pz);
   lastFeastStep = performance.now();
+}
+
+function layoutFeastBodiesFromTrace(tMs, frame) {
+  const pf = frame?.positions_flat;
+  if (!pf) return;
+  const ext = data.meta.extent;
+  const cx = (ext[0] + ext[1]) / 2, cy = (ext[2] + ext[3]) / 2, cz = (ext[4] + ext[5]) / 2;
+  const scale = 0.85;
+  for (let i = 0; i < data.requests.length; i++) {
+    const b = feastBodies[i];
+    const life = requestLife(data.requests[i], tMs);
+    if (life.phase === 'pending') {
+      b.x = b.hx; b.y = b.hy; b.z = b.hz;
+    } else {
+      b.x = cx + (pf[i * 3] - cx) * scale;
+      b.y = cy + (pf[i * 3 + 1] - cy) * scale;
+      b.z = cz + (pf[i * 3 + 2] - cz) * scale;
+    }
+    b.vx = b.vy = b.vz = 0;
+  }
 }
 
 function stepFeastPhysics(tMs, frame, dt) {
@@ -1638,6 +1660,9 @@ function updateFeast(frame) {
     stepFeastPhysics(tMs, frame, dt);
   } else {
     lastFeastStep = now;
+    layoutFeastBodiesFromTrace(tMs, frame);
+    feastCameraShake = 0;
+    feastGroup.position.set(0, 0, 0);
   }
 
   let activeCount = 0;
@@ -1650,6 +1675,7 @@ function updateFeast(frame) {
     minSize: 0.22,
     maxSize: 2.4,
     span: spanFromExtent() * 2.2,
+    animatePulse: playing,
     getPos: i => {
       const b = feastBodies[i];
       return [b.x, b.y, b.z];
@@ -1699,15 +1725,17 @@ function updateFeast(frame) {
   sp.needsUpdate = true;
   sc.needsUpdate = true;
 
-  if (playing && feastBaseCamera && chaos > 0.35 && activeCount > 8) {
+  if (playing && chaos > 0.35 && activeCount > 8) {
     feastCameraShake = Math.min(0.12, feastCameraShake + 0.02 * chaos * (activeCount / 40));
     const s = feastCameraShake * spanFromExtent();
-    camera.position.x = feastBaseCamera.px + (Math.random() - 0.5) * s;
-    camera.position.y = feastBaseCamera.py + (Math.random() - 0.5) * s * 0.7;
-    camera.position.z = feastBaseCamera.pz + (Math.random() - 0.5) * s;
-  } else if (feastBaseCamera) {
+    feastGroup.position.set(
+      (Math.random() - 0.5) * s,
+      (Math.random() - 0.5) * s * 0.7,
+      (Math.random() - 0.5) * s,
+    );
+  } else {
     feastCameraShake = 0;
-    camera.position.set(feastBaseCamera.px, feastBaseCamera.py, feastBaseCamera.pz);
+    feastGroup.position.set(0, 0, 0);
   }
 
   updateFeastHud(frame, activeCount);
@@ -2524,6 +2552,12 @@ document.getElementById('optimizeLevel').addEventListener('input', e => {
 document.getElementById('play').addEventListener('click', () => {
   playing = !playing;
   document.getElementById('play').textContent = playing ? '⏸' : '▶';
+  if (!playing) {
+    lastFeastStep = performance.now();
+    feastCameraShake = 0;
+    feastGroup.position.set(0, 0, 0);
+    if (activeView === 'feast') updateFrame();
+  }
 });
 document.getElementById('time').addEventListener('input', e => { tNorm = +e.target.value; updateFrame(); });
 function formatSpeedLabel(sliderValue) {
